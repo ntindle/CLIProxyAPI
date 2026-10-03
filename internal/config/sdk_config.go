@@ -77,6 +77,11 @@ type SDKConfig struct {
 // ClientConfig configures client-facing compatibility behavior.
 type ClientConfig struct {
 	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+
+	// NativeModelLists narrows the model list each native client is shown to the
+	// models of its own provider: Claude Code sees Claude models only and Codex sees
+	// Codex models only. Requests are unaffected. Default false lists every model.
+	NativeModelLists bool `yaml:"native-model-lists,omitempty" json:"native-model-lists,omitempty"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

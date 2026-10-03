@@ -206,6 +206,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	s.startQuotaRefresher(ctx)
+	s.startLiveModelSync(ctx)
 
 	select {
 	case <-ctx.Done():

@@ -116,6 +116,9 @@ type ClaudeConfig struct {
 	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// LiveModels discovers the models each Claude OAuth credential can use from the
+	// provider and adds the ones the model catalog does not list yet. Default is false.
+	LiveModels bool `yaml:"live-models,omitempty" json:"live-models,omitempty"`
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
@@ -217,6 +220,13 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+	// Websockets makes every Codex OAuth credential use the upstream WebSocket transport
+	// for downstream WebSocket requests unless its auth file sets "websockets" itself.
+	// Default is false, which leaves the transport to each auth file.
+	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
+	// LiveModels discovers the models each Codex OAuth credential can use from the
+	// provider and adds the ones the model catalog does not list yet. Default is false.
+	LiveModels bool `yaml:"live-models,omitempty" json:"live-models,omitempty"`
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
@@ -371,6 +381,18 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// FillFirstOrder chooses which credential the fill-first strategy drains first.
+	// "id" (default) uses the lowest credential ID. "soonest-reset" uses the credential
+	// whose longest quota window resets soonest, so quota that is about to expire is
+	// spent before it is lost. Ignored by the other strategies.
+	FillFirstOrder string `yaml:"fill-first-order,omitempty" json:"fill-first-order,omitempty"`
+
+	// QuotaRefreshInterval is how often idle Claude and Codex OAuth credentials have
+	// their quota windows refreshed from the provider usage endpoint, so reset times
+	// are known before a credential is used. It only runs with fill-first-order
+	// "soonest-reset". Default: 30m. Minimum: 1m. "0" or "off" disables it.
+	QuotaRefreshInterval string `yaml:"quota-refresh-interval,omitempty" json:"quota-refresh-interval,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

@@ -65,7 +65,7 @@ func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *SoonestResetSelector:
 		return true
 	default:
 		return false
@@ -1638,7 +1638,13 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.Selector())
+	selector := m.Selector()
+	if _, soonestReset := selector.(*SoonestResetSelector); soonestReset {
+		// The scheduler index is ordered by credential ID and is not rebuilt when
+		// quota signals change, so soonest-reset ordering always takes the selector path.
+		return false
+	}
+	return isBuiltInSelector(selector)
 }
 
 func shouldRetrySchedulerPick(err error) bool {
