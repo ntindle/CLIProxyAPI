@@ -45,7 +45,7 @@ func claudeAuthWithQuota(id string, now time.Time, used5h string, reset5h time.T
 	}
 }
 
-func TestQuotaWindowsClaudeKeepsCredentialWideWindowsOnly(t *testing.T) {
+func TestForkQuotaWindowsClaudeKeepsCredentialWideWindowsOnly(t *testing.T) {
 	now := time.Unix(1_790_000_000, 0)
 	reset5h := now.Add(2 * time.Hour)
 	reset7d := now.Add(3 * 24 * time.Hour)
@@ -67,7 +67,7 @@ func TestQuotaWindowsClaudeKeepsCredentialWideWindowsOnly(t *testing.T) {
 	}
 }
 
-func TestQuotaWindowsClaudeRejectedStatusCountsAsFullyUsed(t *testing.T) {
+func TestForkQuotaWindowsClaudeRejectedStatusCountsAsFullyUsed(t *testing.T) {
 	windows := QuotaWindows("claude", QuotaState{Signals: map[string]string{
 		"Anthropic-Ratelimit-Unified-5h-Status":      "rejected",
 		"Anthropic-Ratelimit-Unified-5h-Utilization": "0.97",
@@ -77,7 +77,7 @@ func TestQuotaWindowsClaudeRejectedStatusCountsAsFullyUsed(t *testing.T) {
 	}
 }
 
-func TestQuotaWindowsCodexUsesAbsoluteResetBeforeRelative(t *testing.T) {
+func TestForkQuotaWindowsCodexUsesAbsoluteResetBeforeRelative(t *testing.T) {
 	observedAt := time.Unix(1_790_000_000, 0)
 	weeklyReset := observedAt.Add(48 * time.Hour)
 
@@ -108,7 +108,7 @@ func TestQuotaWindowsCodexUsesAbsoluteResetBeforeRelative(t *testing.T) {
 	}
 }
 
-func TestQuotaWindowsUnknownProviderOrEmptySignals(t *testing.T) {
+func TestForkQuotaWindowsUnknownProviderOrEmptySignals(t *testing.T) {
 	if got := QuotaWindows("claude", QuotaState{}); got != nil {
 		t.Fatalf("empty signals = %+v, want nil", got)
 	}
@@ -117,7 +117,7 @@ func TestQuotaWindowsUnknownProviderOrEmptySignals(t *testing.T) {
 	}
 }
 
-func TestPickSoonestResetOrdering(t *testing.T) {
+func TestForkPickSoonestResetOrdering(t *testing.T) {
 	now := time.Unix(1_790_000_000, 0)
 	hours := func(n int) time.Time { return now.Add(time.Duration(n) * time.Hour) }
 
@@ -193,7 +193,7 @@ func TestPickSoonestResetOrdering(t *testing.T) {
 	}
 }
 
-func TestSoonestResetSelectorSkipsSchedulerFastPath(t *testing.T) {
+func TestForkSoonestResetSelectorSkipsSchedulerFastPath(t *testing.T) {
 	manager := NewManager(nil, &SoonestResetSelector{}, nil)
 	if !isBuiltInSelector(manager.Selector()) {
 		t.Fatal("soonest-reset selector must be treated as a built-in selector")
@@ -207,7 +207,7 @@ func TestSoonestResetSelectorSkipsSchedulerFastPath(t *testing.T) {
 	}
 }
 
-func TestManagerSoonestResetFollowsObservedQuota(t *testing.T) {
+func TestForkManagerSoonestResetFollowsObservedQuota(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
 		selector func() Selector
@@ -280,7 +280,7 @@ func TestManagerSoonestResetFollowsObservedQuota(t *testing.T) {
 	}
 }
 
-func TestManagerObserveQuotaSignalsKeepsNewerSnapshot(t *testing.T) {
+func TestForkManagerObserveQuotaSignalsKeepsNewerSnapshot(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, nil, nil)
 	authID := "observe-quota-signals-auth"

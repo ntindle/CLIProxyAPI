@@ -7,7 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
-func TestSynthesizeAuthFileCodexWebsocketsDefault(t *testing.T) {
+func TestForkSynthesizeAuthFileCodexWebsocketsDefault(t *testing.T) {
 	for _, testCase := range []struct {
 		name          string
 		configDefault bool

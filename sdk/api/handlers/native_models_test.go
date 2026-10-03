@@ -7,7 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-func TestNativeProviderModels(t *testing.T) {
+func TestForkNativeProviderModels(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	claudeModel, codexModel, sharedModel := "native-list-claude-model", "native-list-codex-model", "native-list-shared-model"
 	modelRegistry.RegisterClient("native-list-claude-client", "claude", []*registry.ModelInfo{{ID: claudeModel}, {ID: sharedModel}})

@@ -23,7 +23,7 @@ func registeredModel(t *testing.T, authID, modelID string) *ModelInfo {
 	return nil
 }
 
-func TestParseLiveModels(t *testing.T) {
+func TestForkParseLiveModels(t *testing.T) {
 	claude := parseClaudeLiveModels([]byte(`{"data":[
 		{"type":"model","id":"claude-opus-9-9","display_name":"Claude Opus 9.9","created_at":"2027-01-02T03:04:05Z","max_input_tokens":500000,"max_tokens":64000},
 		{"type":"model","id":"not-a-claude-model"},
@@ -54,7 +54,7 @@ func TestParseLiveModels(t *testing.T) {
 	}
 }
 
-func TestLiveModelAdditionsForBuildsFromClosestCatalogModel(t *testing.T) {
+func TestForkLiveModelAdditionsForBuildsFromClosestCatalogModel(t *testing.T) {
 	catalog := internalregistry.GetClaudeModels()
 	if len(catalog) == 0 {
 		t.Fatal("claude catalog is empty")
@@ -93,7 +93,7 @@ func TestLiveModelAdditionsForBuildsFromClosestCatalogModel(t *testing.T) {
 	}
 }
 
-func TestLiveModelAdditionsForCodexHonoursPlan(t *testing.T) {
+func TestForkLiveModelAdditionsForCodexHonoursPlan(t *testing.T) {
 	discovered := []liveModel{
 		{id: "gpt-9-live", plans: []string{"pro", "plus"}, thinkingLevels: []string{"low", "high"}},
 		{id: "gpt-9-team-only", plans: []string{"team"}},
@@ -111,7 +111,7 @@ func TestLiveModelAdditionsForCodexHonoursPlan(t *testing.T) {
 	}
 }
 
-func TestSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
+func TestForkSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 	knownClaude := internalregistry.GetClaudeModels()[0].ID
 	knownCodex := internalregistry.GetCodexProModels()[0].ID
 
@@ -214,7 +214,7 @@ func TestSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 	}
 }
 
-func TestSyncLiveModelsBacksOffAfterFailure(t *testing.T) {
+func TestForkSyncLiveModelsBacksOffAfterFailure(t *testing.T) {
 	requests := 0
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

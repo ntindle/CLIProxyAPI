@@ -19,7 +19,7 @@ func soonestResetConfig() *internalconfig.Config {
 	}
 }
 
-func TestSoonestResetRoutingSelector(t *testing.T) {
+func TestForkSoonestResetRoutingSelector(t *testing.T) {
 	state := normalizedRoutingRuntimeState(soonestResetConfig())
 	if state.strategy != "fill-first" || !state.fillFirstSoonestReset {
 		t.Fatalf("state = %+v, want fill-first in soonest-reset order", state)
@@ -52,7 +52,7 @@ func TestSoonestResetRoutingSelector(t *testing.T) {
 	affinity.Stop()
 }
 
-func TestQuotaRefreshInterval(t *testing.T) {
+func TestForkQuotaRefreshInterval(t *testing.T) {
 	for _, testCase := range []struct {
 		name        string
 		mutate      func(*internalconfig.Config)
@@ -83,7 +83,7 @@ func TestQuotaRefreshInterval(t *testing.T) {
 	}
 }
 
-func TestClaudeUsageQuotaHeaders(t *testing.T) {
+func TestForkClaudeUsageQuotaHeaders(t *testing.T) {
 	headers := claudeUsageQuotaHeaders([]byte(`{
 		"five_hour": {"utilization": 23.0, "resets_at": "2026-10-03T14:00:00.500000+00:00"},
 		"seven_day": {"utilization": 58, "resets_at": "2026-10-09T13:00:00Z"},
@@ -108,7 +108,7 @@ func TestClaudeUsageQuotaHeaders(t *testing.T) {
 	}
 }
 
-func TestClaudeUsageQuotaHeadersWindowNotStarted(t *testing.T) {
+func TestForkClaudeUsageQuotaHeadersWindowNotStarted(t *testing.T) {
 	headers := claudeUsageQuotaHeaders([]byte(`{"five_hour": {"utilization": 0, "resets_at": null}, "seven_day": null}`))
 	if got := headers.Get("Anthropic-Ratelimit-Unified-5h-Utilization"); got != "0" {
 		t.Fatalf("5h utilization = %q, want 0", got)
@@ -121,7 +121,7 @@ func TestClaudeUsageQuotaHeadersWindowNotStarted(t *testing.T) {
 	}
 }
 
-func TestCodexUsageQuotaHeaders(t *testing.T) {
+func TestForkCodexUsageQuotaHeaders(t *testing.T) {
 	headers := codexUsageQuotaHeaders([]byte(`{
 		"plan_type": "pro",
 		"rate_limit": {
@@ -182,7 +182,7 @@ func (e *usageEndpoint) count(token string) int {
 	return e.requests["Bearer "+token]
 }
 
-func TestRefreshIdleQuotaSignalsPollsStaleCredentials(t *testing.T) {
+func TestForkRefreshIdleQuotaSignalsPollsStaleCredentials(t *testing.T) {
 	now := time.Now()
 	soonReset := now.Add(24 * time.Hour).Truncate(time.Second)
 	laterReset := now.Add(6 * 24 * time.Hour).Truncate(time.Second)
@@ -296,7 +296,7 @@ func TestRefreshIdleQuotaSignalsPollsStaleCredentials(t *testing.T) {
 	}
 }
 
-func TestRefreshIdleQuotaSignalsDisabledWithoutSoonestReset(t *testing.T) {
+func TestForkRefreshIdleQuotaSignalsDisabledWithoutSoonestReset(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++

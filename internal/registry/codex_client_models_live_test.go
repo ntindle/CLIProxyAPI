@@ -53,7 +53,7 @@ func resetCodexClientLiveOverlay(t *testing.T) {
 	t.Cleanup(restore)
 }
 
-func TestMergeLiveCodexClientModelsAddsAndReplacesBySlug(t *testing.T) {
+func TestForkMergeLiveCodexClientModelsAddsAndReplacesBySlug(t *testing.T) {
 	resetCodexClientLiveOverlay(t)
 	before := servedCodexClientModels(t)
 	revisionBefore := GetCodexClientModelsRevision()
@@ -109,7 +109,7 @@ func TestMergeLiveCodexClientModelsAddsAndReplacesBySlug(t *testing.T) {
 	}
 }
 
-func TestMergeLiveCodexClientModelsRejectsUnusablePayloads(t *testing.T) {
+func TestForkMergeLiveCodexClientModelsRejectsUnusablePayloads(t *testing.T) {
 	resetCodexClientLiveOverlay(t)
 	revisionBefore := GetCodexClientModelsRevision()
 
