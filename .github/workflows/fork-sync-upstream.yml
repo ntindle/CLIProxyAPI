@@ -1,0 +1,159 @@
+name: fork-sync-upstream
+
+# Merges the latest upstream release into this fork once a week, checks that the fork still
+# builds and passes its tests, pushes the merge, and publishes a new image. When the merge
+# conflicts or the checks fail nothing is pushed and an issue is opened instead.
+
+on:
+  schedule:
+    # Mondays 09:23 UTC.
+    - cron: "23 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream tag or branch to merge. Defaults to the latest release tag.
+        required: false
+        type: string
+
+concurrency:
+  group: fork-sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  packages: write
+
+env:
+  UPSTREAM_URL: https://github.com/router-for-me/CLIProxyAPI.git
+  ISSUE_TITLE: Upstream sync needs attention
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Merge upstream
+        id: merge
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch --quiet --no-tags "${UPSTREAM_URL}" 'refs/tags/v*:refs/tags/v*' '+refs/heads/main:refs/remotes/upstream/main'
+          target="${UPSTREAM_REF:-}"
+          if [[ -z "${target}" ]]; then
+            target="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+          elif ! git rev-parse --verify --quiet "${target}^{commit}" >/dev/null; then
+            target="upstream/${target}"
+          fi
+          git rev-parse --verify --quiet "${target}^{commit}" >/dev/null || { echo "::error::unknown upstream ref ${target}"; exit 1; }
+          echo "target=${target}" >> "${GITHUB_OUTPUT}"
+
+          if git merge-base --is-ancestor "${target}" HEAD; then
+            echo "main already contains ${target}"
+            echo "merged=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git merge --no-ff --no-commit "${target}" || true
+
+          # The token Actions provides cannot push changes to workflow files, and upstream's
+          # workflows are not used here, so the workflows directory stays exactly as the fork had it.
+          git rm -r -q -f --cached --ignore-unmatch .github/workflows
+          rm -rf .github/workflows
+          git checkout HEAD -- .github/workflows
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [[ -n "${conflicts}" ]]; then
+            {
+              echo "conflicts<<CONFLICTS_EOF"
+              echo "${conflicts}"
+              echo "CONFLICTS_EOF"
+            } >> "${GITHUB_OUTPUT}"
+            echo "::error::merging ${target} conflicts in: ${conflicts//$'\n'/, }"
+            git merge --abort || git reset --hard HEAD
+            exit 1
+          fi
+
+          git commit --quiet -m "Merge upstream ${target} into main"
+          echo "merged=true" >> "${GITHUB_OUTPUT}"
+      - name: Build and test the merge
+        id: check
+        if: steps.merge.outputs.merged == 'true'
+        run: bash .github/scripts/fork-check.sh
+      - name: Push
+        id: push
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          echo "pushed=true" >> "${GITHUB_OUTPUT}"
+      - name: Open an issue when the sync cannot complete
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.merge.outputs.target }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          body_file="$(mktemp)"
+          {
+            echo "The weekly upstream sync could not merge \`${TARGET:-the latest upstream release}\` into \`main\`. Nothing was pushed and no image was published."
+            echo ""
+            if [[ -n "${CONFLICTS:-}" ]]; then
+              echo "The merge conflicts in:"
+              echo ""
+              while IFS= read -r file; do
+                [[ -n "${file}" ]] && echo "- \`${file}\`"
+              done <<< "${CONFLICTS}"
+            elif [[ "${CHECK_OUTCOME:-}" == "failure" ]]; then
+              echo "The merge was clean, but the build or the tests failed afterwards."
+            else
+              echo "The run failed before or after the merge; see the log."
+            fi
+            echo ""
+            echo "Run: ${RUN_URL}"
+            echo ""
+            echo "To fix it locally:"
+            echo ""
+            echo '```bash'
+            echo "git fetch https://github.com/router-for-me/CLIProxyAPI.git 'refs/tags/v*:refs/tags/v*'"
+            echo "git merge ${TARGET:-<upstream tag>}"
+            echo "git checkout HEAD -- .github/workflows"
+            echo "bash .github/scripts/fork-check.sh"
+            echo "git push origin main"
+            echo '```'
+          } > "${body_file}"
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${ISSUE_TITLE}\" in:title" --json number --jq '.[0].number // empty' || true)"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file "${body_file}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${ISSUE_TITLE}" --body-file "${body_file}"
+          fi
+
+  image:
+    needs: sync
+    if: needs.sync.outputs.pushed == 'true'
+    uses: ./.github/workflows/fork-image.yml
+    with:
+      ref: main
+    permissions:
+      contents: read
+      packages: write

@@ -1,0 +1,103 @@
+name: fork-image
+
+# Tests the fork and publishes its container image to ghcr.io/<owner>/cliproxyapi.
+#   latest                        moves with every build; this is the tag Unraid tracks
+#   <upstream tag>-<short commit> immutable, for rollback
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "assets/**"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build. Defaults to the ref that triggered the run.
+        type: string
+        required: false
+
+concurrency:
+  group: fork-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and test
+        run: bash .github/scripts/fork-check.sh
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Refresh embedded model catalogs
+        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Resolve build metadata
+        run: |
+          set -euo pipefail
+          # Release tags live upstream; the fork only carries the ones it had when it was created.
+          git fetch --quiet --no-tags https://github.com/router-for-me/CLIProxyAPI.git 'refs/tags/v*:refs/tags/v*' \
+            || echo "::warning::could not fetch upstream tags; using the tags already in the fork"
+          version="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo dev)"
+          commit="$(git rev-parse --short=7 HEAD)"
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "VERSION=${version}"
+            echo "COMMIT=${commit}"
+            echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "IMAGE=ghcr.io/${owner}/cliproxyapi"
+            echo "TAGS=latest,${version}-${commit}"
+          } >> "${GITHUB_ENV}"
+          echo "Building ${version} (${commit})"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          docker buildx bake -f docker/fork/docker-bake.hcl \
+            --set "*.cache-from=type=registry,ref=${IMAGE}:buildcache" \
+            --set "fork.cache-to=type=registry,ref=${IMAGE}:buildcache,mode=max" \
+            --push fork
+      - name: Summarize
+        run: |
+          {
+            echo "### Published"
+            echo ""
+            echo "- \`${IMAGE}:latest\`"
+            echo "- \`${IMAGE}:${VERSION}-${COMMIT}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

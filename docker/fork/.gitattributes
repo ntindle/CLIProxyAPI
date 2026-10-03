@@ -1,0 +1,5 @@
+# Files copied into the image or run by CI must keep LF line endings on every checkout.
+*.sh text eol=lf
+*.yaml text eol=lf
+*.hcl text eol=lf
+Dockerfile text eol=lf

@@ -1,0 +1,70 @@
+# Configuration written by the ntindle fork image on first start.
+# From here on this file belongs to the proxy and its management panel; the image never
+# rewrites it. config.example.yaml in the image documents every available option.
+config-version: 8
+
+server:
+  host: ""
+  port: 8317
+
+management:
+  # The management key comes from the MANAGEMENT_PASSWORD environment variable.
+  allow-remote: true
+  secret-key: ""
+  disable-control-panel: false
+
+# Keys clients present to this proxy. These are not upstream provider keys.
+access:
+  api-keys:
+    __API_KEYS__
+
+routing:
+  # Drain the credential whose weekly quota window resets soonest first, so quota that is
+  # about to expire is spent before it is lost.
+  strategy: "fill-first"
+  fill-first-order: "soonest-reset"
+  quota-refresh-interval: "30m"
+  # Keep a session on the credential it started on so the provider prompt cache is reused.
+  session-affinity: true
+  session-affinity-ttl: "1h"
+  session-affinity-subagents: true
+  retry:
+    request-retry: 3
+    max-retry-credentials: 0
+    max-retry-interval: 30
+  cooldown:
+    # Remember which credentials are cooling down across restarts.
+    save-cooldown-status: true
+
+client:
+  # Claude Code is only shown Claude models and Codex is only shown Codex models.
+  native-model-lists: true
+
+upstream:
+  claude:
+    # Pick up new Claude models from Anthropic without waiting for a catalog release.
+    live-models: true
+
+oauth:
+  auth-dir: "__DATA_DIR__/auths"
+  providers:
+    codex:
+      # Codex subscription credentials talk to ChatGPT over the Responses WebSocket.
+      websockets: true
+      # Pick up new Codex models from ChatGPT without waiting for a catalog release.
+      live-models: true
+
+observability:
+  logs:
+    debug: false
+    # Required by the Logs Viewer page of the management panel.
+    logging-to-file: true
+    logs-max-total-size-mb: 200
+    request-log: false
+  usage:
+    usage-statistics-enabled: true
+
+plugins:
+  # Shows the Plugins and Plugin Store pages. Nothing is loaded until a plugin is installed.
+  enabled: true
+  dir: "__DATA_DIR__/plugins"
