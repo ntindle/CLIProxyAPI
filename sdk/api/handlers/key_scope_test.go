@@ -92,6 +92,30 @@ func TestForkKeyScopeMatchesLongestPrefix(t *testing.T) {
 	}
 }
 
+func TestForkKeyAllowsProvider(t *testing.T) {
+	handler := keyScopeTestHandler(t)
+
+	for _, testCase := range []struct {
+		name     string
+		apiKey   string
+		provider string
+		want     bool
+	}{
+		{name: "provider in scope", apiKey: "sk-muse-abc", provider: "meta", want: true},
+		{name: "provider named by its alias", apiKey: "sk-muse-abc", provider: "Muse", want: true},
+		{name: "provider out of scope", apiKey: "sk-claude-abc", provider: "meta", want: false},
+		{name: "unrestricted key", apiKey: "admin-key", provider: "meta", want: true},
+		{name: "request without a key", apiKey: "", provider: "meta", want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			c, _ := keyScopeRequestContext(testCase.apiKey)
+			if got := handler.KeyAllowsProvider(c, testCase.provider); got != testCase.want {
+				t.Fatalf("KeyAllowsProvider = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestForkScopeProvidersNarrowsAndRejects(t *testing.T) {
 	handler := keyScopeTestHandler(t)
 	contextFor := func(apiKey string) context.Context {

@@ -1,9 +1,11 @@
 # ntindle fork of CLIProxyAPI
 
 This fork tracks [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and adds
-routing by quota reset time, live model discovery for Claude and Codex subscriptions, and a
-container image with a single data volume. It is built for one setup: Claude Code talking to
-Claude subscriptions and Codex talking to ChatGPT subscriptions, several accounts of each.
+routing by quota reset time, live model discovery for Claude and Codex subscriptions, client API
+keys tied to providers, and a container image with a single data volume. It is built for one
+setup: each coding tool talking only to its own provider through the proxy (Claude Code to Claude
+subscriptions, Codex to ChatGPT subscriptions, the Muse CLI to a Meta account), with several
+accounts of each.
 
 Everything upstream documents still applies. This page covers only what the fork adds.
 
@@ -18,6 +20,7 @@ Everything upstream documents still applies. This page covers only what the fork
 | `upstream.claude.live-models` | `false` | Read the model list from Anthropic with each Claude OAuth credential and add what the bundled catalog lacks. |
 | `client.native-model-lists` | `false` | Claude Code is only shown Claude models; Codex is only shown Codex models. |
 | `client.key-scopes` | none | Limit a client API key to the credentials of the providers it lists. |
+| (no setting) | on | Serve the Muse Code client endpoints (`/muse-code/models` and friends) so the Muse CLI can use the proxy. |
 
 `docker/fork/config.default.yaml`, the configuration the image writes on first start, has every
 one of them turned on. `config.example.yaml` is left exactly as upstream ships it, so it does not
@@ -91,6 +94,41 @@ Key scopes cover model lists and every model request, over HTTP and WebSocket. T
 cover Codex's web search (`/v1/alpha/search`) and voice (`/v1/live`, `/v1/realtime`) endpoints,
 which always use a Codex credential, and they do not apply in Home mode.
 
+### Muse Code endpoints
+
+The Muse CLI asks its endpoint for more than `/v1/responses`: it reads its model catalog from
+`/muse-code/models` at the root of the same origin and does not start without it. The fork serves
+these Muse Code endpoints by forwarding them to Meta with a Meta credential and returning the
+answer unchanged:
+
+| Endpoint | Used for |
+| --- | --- |
+| `/muse-code/models` | Model catalog |
+| `/muse-code/config` | Client configuration |
+| `/muse-code/search` | Web search tool |
+| `/muse-code/browser_open` | Web fetch tool |
+
+They take the same client API keys as the rest of the proxy. A key whose scope does not include
+`meta` gets `404`. The endpoints that mint or revoke Meta credentials, and telemetry, are not
+served. There is no setting; the routes answer `503` when no Meta credential is signed in, and
+they are not available in Home mode.
+
+To point Muse at the proxy, pin the endpoint in Muse's `settings.json` (Muse only sends its key
+to an endpoint named there, not to one passed with `--base-url`) and give it a client API key:
+
+```json
+{
+  "endpoint_transport": {
+    "base_url": "https://proxy.example.com:8317/v1",
+    "auth": "bearer"
+  }
+}
+```
+
+```bash
+export META_API_KEY="sk-muse-77b0..."
+```
+
 ## Container image
 
 `ghcr.io/ntindle/cliproxyapi:latest` is built by `.github/workflows/fork-image.yml` from
@@ -160,5 +198,6 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `sdk/api/handlers/claude/code_handlers.go`, `sdk/api/handlers/openai/codex_client_models.go` | Filter the model list shown to each native client. |
 | `sdk/api/handlers/handlers_execution.go`, `sdk/api/handlers/handlers_stream.go` | Apply key scopes to the providers resolved for a request. |
 | `sdk/api/handlers/handlers_interceptors.go` | Applies key scopes to every model list. |
+| `internal/api/server_routes.go` | Registers the Muse Code endpoints. |
 
 Everything else the fork adds lives in files upstream does not have.

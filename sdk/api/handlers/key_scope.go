@@ -68,6 +68,18 @@ func (h *BaseAPIHandler) keyScope(c *gin.Context) (allowed map[string]struct{}, 
 	return allowed, longest >= 0
 }
 
+// KeyAllowsProvider reports whether the request's client API key may use the
+// provider. Routes that serve a single provider without resolving a model call
+// it; an unrestricted key may use every provider.
+func (h *BaseAPIHandler) KeyAllowsProvider(c *gin.Context, provider string) bool {
+	allowed, scoped := h.keyScope(c)
+	if !scoped {
+		return true
+	}
+	_, ok := allowed[normalizeKeyScopeProvider(provider)]
+	return ok
+}
+
 // scopeProviders narrows the providers resolved for a request to the ones the
 // request's client API key may use. It wraps providersForExecution, so every
 // execution path applies the same rule. A model that only other providers
