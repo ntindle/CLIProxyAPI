@@ -11,6 +11,7 @@ on:
       - "**/*.md"
       - "docs/**"
       - "assets/**"
+      - ".github/**"
   workflow_dispatch:
   workflow_call:
     inputs:

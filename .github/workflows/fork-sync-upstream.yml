@@ -14,6 +14,11 @@ on:
         description: Upstream tag or branch to merge. Defaults to the latest release tag.
         required: false
         type: string
+      branch:
+        description: Branch to merge into. Any branch other than main is a rehearsal and publishes no image.
+        required: false
+        type: string
+        default: main
 
 concurrency:
   group: fork-sync-upstream
@@ -26,6 +31,7 @@ permissions:
 
 env:
   UPSTREAM_URL: https://github.com/router-for-me/CLIProxyAPI.git
+  TARGET_BRANCH: ${{ inputs.branch || 'main' }}
   ISSUE_TITLE: Upstream sync needs attention
 
 jobs:
@@ -35,10 +41,10 @@ jobs:
     outputs:
       pushed: ${{ steps.push.outputs.pushed }}
     steps:
-      - name: Checkout main
+      - name: Checkout the branch to sync
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.branch || 'main' }}
           fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -66,7 +72,7 @@ jobs:
           echo "target=${target}" >> "${GITHUB_OUTPUT}"
 
           if git merge-base --is-ancestor "${target}" HEAD; then
-            echo "main already contains ${target}"
+            echo "${TARGET_BRANCH} already contains ${target}"
             echo "merged=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -91,7 +97,7 @@ jobs:
             exit 1
           fi
 
-          git commit --quiet -m "Merge upstream ${target} into main"
+          git commit --quiet -m "Merge upstream ${target} into ${TARGET_BRANCH}"
           echo "merged=true" >> "${GITHUB_OUTPUT}"
       - name: Build and test the merge
         id: check
@@ -102,7 +108,7 @@ jobs:
         if: steps.merge.outputs.merged == 'true'
         run: |
           set -euo pipefail
-          git push origin HEAD:main
+          git push origin "HEAD:${TARGET_BRANCH}"
           echo "pushed=true" >> "${GITHUB_OUTPUT}"
       - name: Open an issue when the sync cannot complete
         if: failure()
@@ -116,7 +122,7 @@ jobs:
           set -euo pipefail
           body_file="$(mktemp)"
           {
-            echo "The weekly upstream sync could not merge \`${TARGET:-the latest upstream release}\` into \`main\`. Nothing was pushed and no image was published."
+            echo "The upstream sync could not merge \`${TARGET:-the latest upstream release}\` into \`${TARGET_BRANCH}\`. Nothing was pushed and no image was published."
             echo ""
             if [[ -n "${CONFLICTS:-}" ]]; then
               echo "The merge conflicts in:"
@@ -151,7 +157,7 @@ jobs:
 
   image:
     needs: sync
-    if: needs.sync.outputs.pushed == 'true'
+    if: needs.sync.outputs.pushed == 'true' && (inputs.branch == '' || inputs.branch == 'main')
     uses: ./.github/workflows/fork-image.yml
     with:
       ref: main

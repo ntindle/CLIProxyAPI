@@ -84,6 +84,10 @@ merges the latest upstream release tag into `main`, runs `.github/scripts/fork-c
 the merge and publishes a new image. If the merge conflicts or the checks fail it pushes nothing
 and opens an issue titled "Upstream sync needs attention" with the conflicting files.
 
+Run it on demand with `gh workflow run fork-sync-upstream.yml`. Add `-f upstream_ref=<tag>` to
+merge a specific upstream tag, and `-f branch=<name>` to rehearse the merge on another branch
+without publishing an image.
+
 Do not use the "Sync fork" button on GitHub: this fork removes upstream's workflow files and the
 button would bring them back.
 
