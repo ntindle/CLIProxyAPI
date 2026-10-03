@@ -54,10 +54,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch --quiet --no-tags "${UPSTREAM_URL}" 'refs/tags/v*:refs/tags/v*' '+refs/heads/main:refs/remotes/upstream/main'
+          git fetch --quiet --no-tags "${UPSTREAM_URL}" '+refs/tags/v*:refs/tags/v*' '+refs/heads/main:refs/remotes/upstream/main'
           target="${UPSTREAM_REF:-}"
           if [[ -z "${target}" ]]; then
-            target="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+            # No pipe into head here: with pipefail, head closing the pipe early fails the step.
+            target="$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:short)' 'refs/tags/v[0-9]*')"
           elif ! git rev-parse --verify --quiet "${target}^{commit}" >/dev/null; then
             target="upstream/${target}"
           fi

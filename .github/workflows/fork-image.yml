@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           # Release tags live upstream; the fork only carries the ones it had when it was created.
-          git fetch --quiet --no-tags https://github.com/router-for-me/CLIProxyAPI.git 'refs/tags/v*:refs/tags/v*' \
+          git fetch --quiet --no-tags https://github.com/router-for-me/CLIProxyAPI.git '+refs/tags/v*:refs/tags/v*' \
             || echo "::warning::could not fetch upstream tags; using the tags already in the fork"
           version="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo dev)"
           commit="$(git rev-parse --short=7 HEAD)"
