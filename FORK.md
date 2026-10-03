@@ -18,7 +18,9 @@ Everything upstream documents still applies. This page covers only what the fork
 | `upstream.claude.live-models` | `false` | Read the model list from Anthropic with each Claude OAuth credential and add what the bundled catalog lacks. |
 | `client.native-model-lists` | `false` | Claude Code is only shown Claude models; Codex is only shown Codex models. |
 
-`config.example.yaml` documents each setting in place.
+`docker/fork/config.default.yaml`, the configuration the image writes on first start, has every
+one of them turned on. `config.example.yaml` is left exactly as upstream ships it, so it does not
+mention them.
 
 ### Soonest-reset order
 
@@ -115,6 +117,5 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `internal/watcher/synthesizer/file.go` | Applies the Codex WebSocket default to auth files. |
 | `internal/registry/codex_client_models.go` | Lays live Codex catalog entries over the installed catalog. |
 | `sdk/api/handlers/claude/code_handlers.go`, `sdk/api/handlers/openai/codex_client_models.go` | Filter the model list shown to each native client. |
-| `config.example.yaml` | Documents the settings. |
 
 Everything else the fork adds lives in files upstream does not have.
