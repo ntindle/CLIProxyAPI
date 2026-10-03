@@ -82,6 +82,22 @@ type ClientConfig struct {
 	// models of its own provider: Claude Code sees Claude models only and Codex sees
 	// Codex models only. Requests are unaffected. Default false lists every model.
 	NativeModelLists bool `yaml:"native-model-lists,omitempty" json:"native-model-lists,omitempty"`
+
+	// KeyScopes limits client API keys to the credentials of the providers they list.
+	// A scoped key only sees those providers' models and can only send requests to them.
+	// Keys that match no entry are unrestricted. The list sits behind a pointer so that
+	// ClientConfig stays comparable with ==.
+	KeyScopes *[]ClientKeyScope `yaml:"key-scopes,omitempty" json:"key-scopes,omitempty"`
+}
+
+// ClientKeyScope limits the client API keys starting with KeyPrefix to Providers.
+type ClientKeyScope struct {
+	// KeyPrefix selects the client API keys the scope applies to: every key that starts
+	// with it. A full key is also a valid prefix. The longest matching prefix wins.
+	KeyPrefix string `yaml:"key-prefix" json:"key-prefix"`
+	// Providers lists the provider keys the matching keys may use, for example claude,
+	// codex, meta or xai. anthropic, openai, chatgpt, muse and grok are accepted aliases.
+	Providers []string `yaml:"providers" json:"providers"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

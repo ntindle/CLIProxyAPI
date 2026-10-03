@@ -44,6 +44,9 @@ require_hook internal/registry/codex_client_models.go 'codexClientLiveOverlay.ap
 require_hook internal/watcher/synthesizer/file.go 'cfg.Codex.Websockets'
 require_hook sdk/api/handlers/claude/code_handlers.go 'handlers.NativeProviderModels(h.Cfg, h.Models(), "claude")'
 require_hook sdk/api/handlers/openai/codex_client_models.go 'handlers.NativeProviderModels(h.Cfg, models, "codex")'
+require_hook sdk/api/handlers/handlers_execution.go 'h.scopeProviders(ctx, originalRequestedModel)(h.providersForExecution(' 2
+require_hook sdk/api/handlers/handlers_stream.go 'h.scopeProviders(ctx, originalRequestedModel)(h.providersForExecution('
+require_hook sdk/api/handlers/handlers_interceptors.go 'body = h.scopeModelList(c, body)'
 
 echo "== fork tests"
 go test -count=1 -run '^TestFork' "${fork_packages[@]}"

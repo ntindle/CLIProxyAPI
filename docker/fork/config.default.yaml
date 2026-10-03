@@ -39,6 +39,13 @@ routing:
 client:
   # Claude Code is only shown Claude models and Codex is only shown Codex models.
   native-model-lists: true
+  # Give each tool its own key under access.api-keys and tie the key to one provider here. A
+  # scoped key only sees that provider's models and cannot send requests anywhere else.
+  # key-scopes:
+  #   - key-prefix: "sk-claude-"
+  #     providers: ["claude"]
+  #   - key-prefix: "sk-codex-"
+  #     providers: ["codex"]
 
 upstream:
   claude:

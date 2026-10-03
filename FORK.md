@@ -17,6 +17,7 @@ Everything upstream documents still applies. This page covers only what the fork
 | `oauth.providers.codex.live-models` | `false` | Read the Codex model catalog from ChatGPT with each Codex OAuth credential and add what the bundled catalog lacks. |
 | `upstream.claude.live-models` | `false` | Read the model list from Anthropic with each Claude OAuth credential and add what the bundled catalog lacks. |
 | `client.native-model-lists` | `false` | Claude Code is only shown Claude models; Codex is only shown Codex models. |
+| `client.key-scopes` | none | Limit a client API key to the credentials of the providers it lists. |
 
 `docker/fork/config.default.yaml`, the configuration the image writes on first start, has every
 one of them turned on. `config.example.yaml` is left exactly as upstream ships it, so it does not
@@ -53,6 +54,42 @@ catalog does not list yet. A discovered model takes its capability metadata from
 model with the closest name and its name, context window and reasoning levels from the provider.
 Catalog models are never removed or changed. For Codex, the provider's own catalog entries are
 also what Codex clients are served.
+
+### Key scopes
+
+By default any client API key can reach every signed-in account: the proxy resolves a model name
+to whichever providers serve it and translates between protocols on the way. `client.key-scopes`
+ties a key to providers instead:
+
+```yaml
+access:
+  api-keys:
+    - "sk-claude-4f1c..."
+    - "sk-codex-9a2e..."
+    - "sk-muse-77b0..."
+
+client:
+  key-scopes:
+    - key-prefix: "sk-claude-"
+      providers: ["claude"]
+    - key-prefix: "sk-codex-"
+      providers: ["codex"]
+    - key-prefix: "sk-muse-"
+      providers: ["meta"]
+```
+
+A key that starts with `key-prefix` only sees the models of those providers, in every model list
+the proxy serves, and a request for any other model is answered `400 model_not_found` without
+touching a credential. When several entries match a key the longest prefix wins, and a full key
+is a valid prefix. A key that matches no entry is unrestricted.
+
+`providers` takes the provider a credential is registered under (`claude`, `codex`, `meta`,
+`xai`, `gemini`, `antigravity`, `kimi`, `devin`, or the name of an OpenAI-compatible provider);
+`anthropic`, `openai`, `chatgpt`, `muse` and `grok` are accepted as aliases.
+
+Key scopes cover model lists and every model request, over HTTP and WebSocket. They do not
+cover Codex's web search (`/v1/alpha/search`) and voice (`/v1/live`, `/v1/realtime`) endpoints,
+which always use a Codex credential, and they do not apply in Home mode.
 
 ## Container image
 
@@ -121,5 +158,7 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `internal/watcher/synthesizer/file.go` | Applies the Codex WebSocket default to auth files. |
 | `internal/registry/codex_client_models.go` | Lays live Codex catalog entries over the installed catalog. |
 | `sdk/api/handlers/claude/code_handlers.go`, `sdk/api/handlers/openai/codex_client_models.go` | Filter the model list shown to each native client. |
+| `sdk/api/handlers/handlers_execution.go`, `sdk/api/handlers/handlers_stream.go` | Apply key scopes to the providers resolved for a request. |
+| `sdk/api/handlers/handlers_interceptors.go` | Applies key scopes to every model list. |
 
 Everything else the fork adds lives in files upstream does not have.
