@@ -21,6 +21,7 @@ Everything upstream documents still applies. This page covers only what the fork
 | `client.native-model-lists` | `false` | Claude Code is only shown Claude models; Codex is only shown Codex models. |
 | `client.key-scopes` | none | Limit a client API key to the credentials of the providers it lists. |
 | (no setting) | on | Serve the Muse Code client endpoints (`/muse-code/models` and friends) so the Muse CLI can use the proxy. |
+| (no setting) | on | Record Meta's subscription usage on the credential and pass its event through to Responses clients. |
 
 `docker/fork/config.default.yaml`, the configuration the image writes on first start, has every
 one of them turned on. `config.example.yaml` is left exactly as upstream ships it, so it does not
@@ -185,6 +186,30 @@ to an endpoint named there, not to one passed with `--base-url`) and give it a c
 export META_API_KEY="sk-muse-77b0..."
 ```
 
+### Meta subscription usage
+
+Meta has no usage endpoint. It reports the account's subscription windows with every Responses
+stream, in a `response.subscription_usage` event after `response.completed`:
+
+```json
+{"type":"response.subscription_usage","subscription":{"tier":"…",
+ "window":{"used_percent":12,"window_duration_mins":300,"resets_at":1791465557},
+ "weekly":{"used_percent":5,"resets_at":1791763200}}}
+```
+
+The fork records that event on the Meta credential as quota signals, the same way Claude and Codex
+rate-limit headers are recorded: `X-Meta-Window-Used-Percent`, `X-Meta-Window-Minutes`,
+`X-Meta-Window-Reset-At`, `X-Meta-Weekly-Used-Percent`, `X-Meta-Weekly-Reset-At` and `X-Meta-Tier`
+(percentages verbatim, reset times in unix seconds). They appear under `quota` in the management
+`auth-files` list, which is what T3 Code's usage view reads, and the soonest-reset order uses
+them. A credential reports nothing until something has used it through the proxy.
+
+Responses clients also receive the event, although it arrives after the terminal event; the Muse
+CLI reads it to show its quota. Every other frame after a terminal event is still dropped.
+
+Reloading a credential file from disk keeps its last observation, since the file does not store
+it. This applies to every provider.
+
 ## Container image
 
 `ghcr.io/ntindle/cliproxyapi:latest` is built by `.github/workflows/fork-image.yml` from
@@ -255,5 +280,9 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `sdk/api/handlers/handlers_execution.go`, `sdk/api/handlers/handlers_stream.go` | Apply key scopes to the providers resolved for a request. |
 | `sdk/api/handlers/handlers_interceptors.go` | Applies key scopes to every model list. |
 | `internal/api/server_routes.go` | Registers the Muse Code endpoints. |
+| `internal/runtime/executor/meta_executor_stream.go`, `internal/runtime/executor/meta_executor_execute.go` | Record Meta's subscription usage event. |
+| `sdk/cliproxy/auth/quota_signals.go` | Accepts the `X-Meta-*` quota signals. |
+| `sdk/cliproxy/auth/conductor_lifecycle.go` | Keeps the quota observation when a credential file is reloaded. |
+| `sdk/api/handlers/openai/openai_responses_handlers.go` | Passes the subscription usage event after the terminal event. |
 
 Everything else the fork adds lives in files upstream does not have.

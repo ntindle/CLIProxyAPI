@@ -108,6 +108,32 @@ func TestForkQuotaWindowsCodexUsesAbsoluteResetBeforeRelative(t *testing.T) {
 	}
 }
 
+func TestForkQuotaWindowsMetaReadsSubscriptionWindows(t *testing.T) {
+	windowReset := time.Unix(1_791_465_557, 0)
+	weeklyReset := time.Unix(1_791_763_200, 0)
+	windows := QuotaWindows("meta", QuotaState{
+		ObservedAt: time.Unix(1_791_447_762, 0),
+		Signals: map[string]string{
+			"X-Meta-Tier":                "tier-1",
+			"X-Meta-Window-Used-Percent": "104",
+			"X-Meta-Window-Minutes":      "300",
+			"X-Meta-Window-Reset-At":     strconv.FormatInt(windowReset.Unix(), 10),
+			"X-Meta-Weekly-Used-Percent": "5",
+			"X-Meta-Weekly-Reset-At":     strconv.FormatInt(weeklyReset.Unix(), 10),
+		},
+	})
+	if len(windows) != 2 {
+		t.Fatalf("windows = %+v, want window and weekly", windows)
+	}
+	short, long := windows[0], windows[1]
+	if short.Name != "window" || short.Duration != 5*time.Hour || short.Used != 1.04 || !short.ResetAt.Equal(windowReset) {
+		t.Fatalf("short window = %+v", short)
+	}
+	if long.Name != "weekly" || long.Duration != 7*24*time.Hour || long.Used != 0.05 || !long.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("long window = %+v", long)
+	}
+}
+
 func TestForkQuotaWindowsUnknownProviderOrEmptySignals(t *testing.T) {
 	if got := QuotaWindows("claude", QuotaState{}); got != nil {
 		t.Fatalf("empty signals = %+v, want nil", got)
