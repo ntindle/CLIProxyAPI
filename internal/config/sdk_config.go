@@ -88,6 +88,9 @@ type ClientConfig struct {
 	// Keys that match no entry are unrestricted. The list sits behind a pointer so that
 	// ClientConfig stays comparable with ==.
 	KeyScopes *[]ClientKeyScope `yaml:"key-scopes,omitempty" json:"key-scopes,omitempty"`
+
+	// AccountPools names reusable sets of credentials without duplicating their state.
+	AccountPools *[]ClientAccountPool `yaml:"account-pools,omitempty" json:"account-pools,omitempty"`
 }
 
 // ClientKeyScope limits the client API keys starting with KeyPrefix to Providers.
@@ -98,6 +101,18 @@ type ClientKeyScope struct {
 	// Providers lists the provider keys the matching keys may use, for example claude,
 	// codex, meta or xai. anthropic, openai, chatgpt, muse and grok are accepted aliases.
 	Providers []string `yaml:"providers" json:"providers"`
+	// Pools is an ordered dedicated-to-shared fallback chain. Omitted preserves
+	// provider-only routing; an explicitly empty list authorizes no credentials.
+	Pools *[]string `yaml:"pools,omitempty" json:"pools,omitempty"`
+}
+
+// ClientAccountPool references existing credentials, never credential material.
+type ClientAccountPool struct {
+	Name      string   `yaml:"name" json:"name"`
+	AuthIDs   []string `yaml:"auth-ids,omitempty" json:"auth-ids,omitempty"`
+	AuthFiles []string `yaml:"auth-files,omitempty" json:"auth-files,omitempty"`
+	// AuthKind optionally restricts members to oauth or apikey credentials.
+	AuthKind string `yaml:"auth-kind,omitempty" json:"auth-kind,omitempty"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

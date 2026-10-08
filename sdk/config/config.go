@@ -11,6 +11,8 @@ type SDKConfig = internalconfig.SDKConfig
 type Config = internalconfig.Config
 
 type ClientConfig = internalconfig.ClientConfig
+type ClientKeyScope = internalconfig.ClientKeyScope
+type ClientAccountPool = internalconfig.ClientAccountPool
 type CodexClientConfig = internalconfig.CodexClientConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
