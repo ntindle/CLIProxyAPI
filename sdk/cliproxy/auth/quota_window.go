@@ -44,6 +44,8 @@ func QuotaWindows(provider string, quota QuotaState) []QuotaWindow {
 		windows = claudeQuotaWindows(quota.Signals)
 	case "codex":
 		windows = codexQuotaWindows(quota.Signals, quota.ObservedAt)
+	case "meta":
+		windows = metaQuotaWindows(quota.Signals)
 	default:
 		return nil
 	}
@@ -126,6 +128,39 @@ func codexQuotaWindows(signals map[string]string, observedAt time.Time) []QuotaW
 			found = true
 		} else if seconds, errSeconds := strconv.ParseFloat(lower[prefix+"reset-after-seconds"], 64); errSeconds == nil && seconds >= 0 && !math.IsInf(seconds, 0) && !observedAt.IsZero() {
 			window.ResetAt = observedAt.Add(time.Duration(seconds * float64(time.Second)))
+			found = true
+		}
+		if found {
+			windows = append(windows, window)
+		}
+	}
+	return windows
+}
+
+// metaQuotaWindows reads the Meta subscription windows recorded from the
+// response.subscription_usage stream event. Meta does not report the weekly
+// window's length, so it is the rolling week the event names it after.
+func metaQuotaWindows(signals map[string]string) []QuotaWindow {
+	lower := make(map[string]string, len(signals))
+	for key, raw := range signals {
+		lower[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(raw)
+	}
+	windows := make([]QuotaWindow, 0, 2)
+	for _, name := range []string{"window", "weekly"} {
+		prefix := "x-meta-" + name + "-"
+		window := QuotaWindow{Name: name, Used: -1}
+		if name == "weekly" {
+			window.Duration = 7 * 24 * time.Hour
+		} else if minutes, errMinutes := strconv.ParseFloat(lower["x-meta-window-minutes"], 64); errMinutes == nil && minutes > 0 && !math.IsInf(minutes, 0) {
+			window.Duration = time.Duration(minutes * float64(time.Minute))
+		}
+		found := false
+		if percent, ok := parseQuotaFraction(lower[prefix+"used-percent"]); ok {
+			window.Used = percent / 100
+			found = true
+		}
+		if resetAt, ok := parseQuotaResetInstant(lower[prefix+"reset-at"]); ok {
+			window.ResetAt = resetAt
 			found = true
 		}
 		if found {
