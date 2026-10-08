@@ -33,7 +33,7 @@ var museCodeRelayPaths = []string{"models", "config", "search", "browser_open"}
 // can use the proxy as its endpoint.
 func (s *Server) registerMuseCodeRoutes() {
 	museCode := s.engine.Group("/muse-code")
-	museCode.Use(AuthMiddleware(s.accessManager))
+	museCode.Use(AuthMiddleware(s.accessManager), s.accountPoolMiddleware())
 	for _, path := range museCodeRelayPaths {
 		museCode.GET("/"+path, s.museCodeRelay)
 		museCode.POST("/"+path, s.museCodeRelay)

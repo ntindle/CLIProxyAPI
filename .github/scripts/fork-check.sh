@@ -48,6 +48,11 @@ require_hook sdk/api/handlers/handlers_execution.go 'h.scopeProviders(ctx, origi
 require_hook sdk/api/handlers/handlers_stream.go 'h.scopeProviders(ctx, originalRequestedModel)(h.providersForExecution('
 require_hook sdk/api/handlers/handlers_interceptors.go 'body = h.scopeModelList(c, body)'
 require_hook internal/api/server_routes.go 's.registerMuseCodeRoutes()'
+require_hook internal/api/server_routes.go 's.accountPoolMiddleware()' 4
+require_hook sdk/cliproxy/auth/conductor_selection.go 'availableAuthsForPoolSelector(ctx' 2
+require_hook sdk/cliproxy/auth/conductor_selection.go 'HasAccountPools(ctx)' 2
+require_hook sdk/api/handlers/handlers_execution.go 'h.accountPoolExecutionContext(ctx)' 2
+require_hook sdk/api/handlers/handlers_stream.go 'h.accountPoolExecutionContext(ctx)'
 
 echo "== fork tests"
 go test -count=1 -run '^TestFork' "${fork_packages[@]}"

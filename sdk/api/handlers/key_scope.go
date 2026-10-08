@@ -138,6 +138,9 @@ func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
 			if id == "" {
 				return true
 			}
+			if !h.accountPoolModelAllowed(c, id) {
+				return true
+			}
 			for _, provider := range modelRegistry.GetModelProviders(id) {
 				if _, ok := allowed[strings.ToLower(provider)]; ok {
 					kept = append(kept, entry.Raw)

@@ -94,6 +94,62 @@ Key scopes cover model lists and every model request, over HTTP and WebSocket. T
 cover Codex's web search (`/v1/alpha/search`) and voice (`/v1/live`, `/v1/realtime`) endpoints,
 which always use a Codex credential, and they do not apply in Home mode.
 
+### Ordered account pools
+
+`client.account-pools` names sets of existing credentials. Add `pools` to a key scope to try
+those sets in order. The provider scope remains an additional restriction. Credentials keep
+one quota, cooldown, refresh owner and concurrency counter even when several routes share them.
+
+```yaml
+client:
+  account-pools:
+    - name: reviewer
+      auth-files: [claude-reviewer.json]
+      auth-kind: oauth
+    - name: shared
+      auth-files: [claude-shared.json, codex-shared-team.json]
+      auth-kind: oauth
+    - name: personal
+      auth-files: [claude-primary.json, codex-primary-pro.json]
+      auth-kind: oauth
+    - name: service-api
+      auth-ids: [claude-api-credential-id]
+      auth-kind: apikey
+  key-scopes:
+    - key-prefix: sk-reviewer-
+      providers: [claude]
+      pools: [reviewer, shared]
+    - key-prefix: sk-personal-
+      providers: [claude, codex]
+      pools: [personal, shared]
+    - key-prefix: sk-service-api-
+      providers: [claude]
+      pools: [service-api]
+```
+
+Use the actual auth-file basenames or manager credential IDs; these are exact matches, with no
+wildcards or email matching. `auth-kind` is optional (`oauth` or `apikey`). It separates API
+spending from subscription credentials; it does not enforce an upstream dollar limit.
+
+Pool order precedes credential priority. Every selection uses the first pool with an eligible
+credential for the requested model, falling back on cooldown, unavailable models, or retryable
+failures. Session affinity works within that pool and is isolated by client key and policy.
+When a dedicated credential recovers, the next selection returns to its pool even if the
+session used shared capacity previously. Retries, pins and model prefixes cannot escape the
+authorized pools. Streaming keeps the existing pre-output retry rules.
+
+Omitting `pools` preserves legacy provider-only routing; `pools: []` denies all credentials.
+Empty groups are valid during provisioning. Invalid or missing group references fail closed.
+Restrict **all** ordinary client keys before adding a dedicated login: any key without a pool
+restriction still has legacy access. Unmatched keys also remain unrestricted.
+
+Pool keys support `/v1/models`, messages/count_tokens, chat/completions, completions, responses
+(HTTP and WebSocket), responses/compact and alpha/search, including the Codex direct aliases.
+Other endpoints, Home dispatch and plugin executors reject pool keys until their selection paths
+support this policy. Unpooled keys retain their existing behavior. Model lists include only
+models registered to eligible accounts. Each execution on a persistent socket re-resolves the
+current policy; in-progress upstream requests keep their selected account.
+
 ### Muse Code endpoints
 
 The Muse CLI asks its endpoint for more than `/v1/responses`: it reads its model catalog from
