@@ -91,9 +91,12 @@ is a valid prefix. A key that matches no entry is unrestricted.
 `xai`, `gemini`, `antigravity`, `kimi`, `devin`, or the name of an OpenAI-compatible provider);
 `anthropic`, `openai`, `chatgpt`, `muse` and `grok` are accepted as aliases.
 
-Key scopes cover model lists and every model request, over HTTP and WebSocket. They do not
-cover Codex's web search (`/v1/alpha/search`) and voice (`/v1/live`, `/v1/realtime`) endpoints,
-which always use a Codex credential, and they do not apply in Home mode.
+Key scopes cover model lists and every model request, over HTTP and WebSocket. Codex's web
+search (`/v1/alpha/search`, `/backend-api/codex/alpha/search`) and voice (`/v1/live` and
+everything under `/v1/realtime`) endpoints take no model to resolve and always use a Codex
+credential, so a key whose scope does not include `codex` is answered
+`403 provider_not_allowed` there without touching a credential. A Realtime client secret is held
+to the scope of the key that minted it. Key scopes do not apply in Home mode.
 
 ### Ordered account pools
 
@@ -145,11 +148,22 @@ Restrict **all** ordinary client keys before adding a dedicated login: any key w
 restriction still has legacy access. Unmatched keys also remain unrestricted.
 
 Pool keys support `/v1/models`, messages/count_tokens, chat/completions, completions, responses
-(HTTP and WebSocket), responses/compact and alpha/search, including the Codex direct aliases.
-Other endpoints, Home dispatch and plugin executors reject pool keys until their selection paths
-support this policy. Unpooled keys retain their existing behavior. Model lists include only
-models registered to eligible accounts. Each execution on a persistent socket re-resolves the
-current policy; in-progress upstream requests keep their selected account.
+(HTTP and WebSocket), responses/compact and alpha/search, including the Codex direct aliases,
+and Codex voice: `/v1/live`, `/v1/realtime` (WebSocket and WebRTC calls), call sidebands and
+hangup, and Realtime client secrets. Other endpoints, Home dispatch and plugin executors reject
+pool keys until their selection paths support this policy. Unpooled keys retain their existing
+behavior. Model lists include only models registered to eligible accounts. Each execution on a
+persistent socket re-resolves the current policy; in-progress upstream requests keep their
+selected account.
+
+A voice call stays on the Codex login that created it. Its sideband (`/v1/live/{call_id}`,
+`/v1/realtime/calls/{call_id}`, `/v1/realtime?call_id=`) and hangup use that login, are open only
+to the key that created the call (the sideband also to the client secret it was created with),
+and are refused once the login is no longer in that key's pools. A client secret from
+`/v1/realtime/client_secrets` or `/v1/realtime/sessions` acts for the key that minted it: each
+use resolves that key's current pools and scope, and a secret cannot mint another. The Realtime
+features the Codex upstream lacks (transcription and translation sessions, SIP accept, reject and
+refer) answer `501` without touching a credential.
 
 ### Muse Code endpoints
 
