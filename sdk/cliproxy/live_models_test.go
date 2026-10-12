@@ -10,6 +10,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -51,6 +52,51 @@ func TestForkParseLiveModels(t *testing.T) {
 	}
 	if len(got.thinkingLevels) != 2 || got.thinkingLevels[1] != "high" || len(got.inputModalities) != 2 || len(got.plans) != 2 || got.plans[0] != "pro" {
 		t.Fatalf("codex model lists = %+v", got)
+	}
+}
+
+func TestForkParseMetaLiveModels(t *testing.T) {
+	models := parseMetaLiveModels([]byte(`{"object":"list","data":[
+		{"id":"muse-live-9","object":"model","created":1791662408,"owned_by":"meta","metadata":{"muse-code":{
+		 "name":"Muse Live 9","description":"Live model","is_hidden":false,
+		 "modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":1007997,"output":128000},
+		 "variants":{"minimal":{"reasoningEffort":"minimal"},"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"max"}}}}},
+		{"id":"muse-hidden-9","metadata":{"muse-code":{"is_hidden":true,"modalities":{"output":["text"]}}}},
+		{"id":"muse-image-9","metadata":{"muse-code":{"modalities":{"input":["text"],"output":["image"]}}}},
+		{"id":"muse-bare-9"},
+		{"id":""}
+	]}`))
+	if len(models) != 2 || models[0].id != "muse-live-9" || models[1].id != "muse-bare-9" {
+		t.Fatalf("meta models = %+v, want the visible text model and the bare entry", models)
+	}
+	got := models[0]
+	if got.displayName != "Muse Live 9" || got.description != "Live model" || got.created != 1791662408 || got.contextLength != 1007997 || got.maxCompletionTokens != 128000 {
+		t.Fatalf("meta model = %+v", got)
+	}
+	if len(got.thinkingLevels) != 3 || got.thinkingLevels[0] != "minimal" || got.thinkingLevels[2] != "max" || len(got.inputModalities) != 2 {
+		t.Fatalf("meta model lists = %+v", got)
+	}
+}
+
+func TestForkLiveModelProviderTakesMetaLoginsOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth *coreauth.Auth
+		want string
+	}{
+		{"meta login with a minted key", &coreauth.Auth{ID: "meta-file", Provider: "meta", Attributes: map[string]string{"api_key": "minted", "source_backend": "file", "source": "/auths/meta.json"}}, "meta"},
+		{"meta login before minting", &coreauth.Auth{ID: "meta-dca", Provider: "meta", Metadata: map[string]any{"access_token": "dca:token"}}, "meta"},
+		{"meta-api-key entry", &coreauth.Auth{ID: "meta-config", Provider: "meta", Attributes: map[string]string{"api_key": "sk-meta", "source": "config:meta[0]"}}, ""},
+		{"disabled meta login", &coreauth.Auth{ID: "meta-off", Provider: "meta", Disabled: true}, ""},
+		{"claude login", &coreauth.Auth{ID: "claude-oauth", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "token"}}, "claude"},
+		{"xai login", &coreauth.Auth{ID: "xai-oauth", Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "token"}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := liveModelProvider(tc.auth)
+			if got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("liveModelProvider = %q, %v; want %q", got, ok, tc.want)
+			}
+		})
 	}
 }
 
@@ -211,6 +257,80 @@ func TestForkSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 	}
 	if registeredModel(t, codexID, "gpt-live-sync-test") == nil {
 		t.Fatal("turning off Claude discovery removed a Codex addition")
+	}
+}
+
+func TestForkSyncLiveModelsRegistersMetaModels(t *testing.T) {
+	knownMeta := internalregistry.GetMetaModels()[0].ID
+
+	var mu sync.Mutex
+	var paths []string
+	var authorization, clientID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		authorization, clientID = r.Header.Get("Authorization"), r.Header.Get("X-Client-Id")
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"` + knownMeta + `","metadata":{"muse-code":{"modalities":{"output":["text"]}}}},
+			{"id":"muse-live-sync-test","created":1791662408,"metadata":{"muse-code":{"name":"muse-live-sync-test",
+			 "modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":777777,"output":128000},
+			 "variants":{"low":{"reasoningEffort":"low"},"max":{"reasoningEffort":"max"}}}}},
+			{"id":"muse-hidden-sync-test","metadata":{"muse-code":{"is_hidden":true}}}
+		]}`))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	cfg := &internalconfig.Config{}
+	cfg.Meta.LiveModels = true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(runtimeexecutor.NewMetaExecutor(cfg))
+	metaID, configKeyID := "live-sync-meta", "live-sync-meta-config-key"
+	for _, auth := range []*coreauth.Auth{
+		{ID: metaID, Provider: "meta", Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "meta-minted-key", "source_backend": "file", "source": "/auths/meta-test.json"}},
+		{ID: configKeyID, Provider: "meta", Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "sk-meta-config", "source": "config:meta[0]"}},
+	} {
+		auth.Status = coreauth.StatusActive
+		if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), auth); errRegister != nil {
+			t.Fatalf("Register(%s): %v", auth.ID, errRegister)
+		}
+		authID := auth.ID
+		t.Cleanup(func() {
+			GlobalModelRegistry().UnregisterClient(authID)
+			liveModelAdditions.set(authID, nil)
+		})
+	}
+	service := &Service{cfg: cfg, coreManager: manager}
+
+	service.syncLiveModels(ctx, make(map[string]time.Time), time.Now())
+
+	model := registeredModel(t, metaID, "muse-live-sync-test")
+	if model == nil {
+		t.Fatal("the discovered Meta model was not registered")
+	}
+	if model.OwnedBy != "meta" || model.Created != 1791662408 || model.ContextLength != 777777 || model.MaxCompletionTokens != 128000 {
+		t.Fatalf("discovered Meta model = %+v", model)
+	}
+	if model.Thinking == nil || len(model.Thinking.Levels) != 2 || model.Thinking.Levels[1] != "max" {
+		t.Fatalf("thinking = %+v, want the reasoning variants Meta reported", model.Thinking)
+	}
+	if registeredModel(t, metaID, knownMeta) == nil {
+		t.Fatalf("catalog model %s was dropped", knownMeta)
+	}
+	if registeredModel(t, metaID, "muse-hidden-sync-test") != nil {
+		t.Fatal("a model Meta hides was registered")
+	}
+	if registeredModel(t, configKeyID, "muse-live-sync-test") != nil {
+		t.Fatal("a meta-api-key entry received live models")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != metaModelsPath {
+		t.Fatalf("requests = %v, want one read of %s", paths, metaModelsPath)
+	}
+	if authorization != "Bearer meta-minted-key" || clientID != "tbh:tui" {
+		t.Fatalf("catalog request carried Authorization %q and X-Client-Id %q", authorization, clientID)
 	}
 }
 

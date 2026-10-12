@@ -108,6 +108,12 @@ func (s *Service) oauthProbeGET(ctx context.Context, cfg *config.Config, provide
 	if errDo != nil {
 		return nil, fmt.Errorf("request failed: %w", errDo)
 	}
+	return readProbeBody(resp)
+}
+
+// readProbeBody reads and closes a probe response and returns its body when
+// the provider answered with success.
+func readProbeBody(resp *http.Response) ([]byte, error) {
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Debugf("oauth probe: close response body: %v", errClose)

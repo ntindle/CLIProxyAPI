@@ -1,7 +1,7 @@
 # ntindle fork of CLIProxyAPI
 
 This fork tracks [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and adds
-routing by quota reset time, live model discovery for Claude and Codex subscriptions, client API
+routing by quota reset time, live model discovery for Claude, Codex and Meta subscriptions, client API
 keys tied to providers, and a container image with a single data volume. It is built for one
 setup: each coding tool talking only to its own provider through the proxy (Claude Code to Claude
 subscriptions, Codex to ChatGPT subscriptions, the Muse CLI to a Meta account), with several
@@ -18,6 +18,7 @@ Everything upstream documents still applies. This page covers only what the fork
 | `oauth.providers.codex.websockets` | `false` | Every Codex OAuth credential uses the upstream WebSocket transport for downstream WebSocket requests, unless its auth file sets `websockets` itself. |
 | `oauth.providers.codex.live-models` | `false` | Read the Codex model catalog from ChatGPT with each Codex OAuth credential and add what the bundled catalog lacks. |
 | `upstream.claude.live-models` | `false` | Read the model list from Anthropic with each Claude OAuth credential and add what the bundled catalog lacks. |
+| `oauth.providers.meta.live-models` | `false` | Read the Muse Code model catalog from Meta with each Meta login and add what the bundled catalog lacks. |
 | `client.native-model-lists` | `false` | Claude Code is only shown Claude models; Codex is only shown Codex models. |
 | `client.key-scopes` | none | Limit a client API key to the credentials of the providers it lists. |
 | (no setting) | on | Serve the Muse Code client endpoints (`/muse-code/models` and friends) so the Muse CLI can use the proxy. |
@@ -58,6 +59,13 @@ catalog does not list yet. A discovered model takes its capability metadata from
 model with the closest name and its name, context window and reasoning levels from the provider.
 Catalog models are never removed or changed. For Codex, the provider's own catalog entries are
 also what Codex clients are served.
+
+For Meta, the list is the Muse Code model catalog (`/muse-code/models` at the root of the origin
+the login talks to), read with the login's own key. Models Meta hides from clients, and models
+that do not answer in text, are skipped. The catalog is what the Muse CLI shows, through the
+[Muse Code endpoints](#muse-code-endpoints), so without this a new Muse model shows up in Muse
+and the proxy refuses it with `unknown provider for model` until the bundled catalog catches up.
+Meta API keys configured under `meta-api-key` keep their configured model list.
 
 ### Key scopes
 
@@ -283,11 +291,12 @@ The fork changes these upstream files, each by a few lines, so these are where c
 
 | File | Change |
 | --- | --- |
-| `internal/config/config_types.go`, `internal/config/sdk_config.go` | The settings above. |
+| `internal/config/config_types.go`, `internal/config/sdk_config.go`, `internal/config/config.go` | The settings above. |
+| `internal/config/config_v8.go` | Places the `meta` settings block at `oauth.providers.meta`. |
 | `sdk/cliproxy/service_config.go` | Builds the soonest-reset selector. |
 | `sdk/cliproxy/auth/conductor_selection.go` | Treats that selector as built in and keeps it off the ID-ordered scheduler fast path. |
 | `sdk/cliproxy/service_lifecycle.go` | Starts the quota refresher and the live model sync. |
-| `sdk/cliproxy/service_models.go` | Adds live models when a Claude or Codex credential registers its models. |
+| `sdk/cliproxy/service_models.go` | Adds live models when a Claude, Codex or Meta credential registers its models. |
 | `internal/watcher/synthesizer/file.go` | Applies the Codex WebSocket default to auth files. |
 | `internal/registry/codex_client_models.go` | Lays live Codex catalog entries over the installed catalog. |
 | `sdk/api/handlers/claude/code_handlers.go`, `sdk/api/handlers/openai/codex_client_models.go` | Filter the model list shown to each native client. |

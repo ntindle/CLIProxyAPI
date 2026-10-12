@@ -2,12 +2,15 @@ package cliproxy
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -28,6 +31,10 @@ const (
 	// codexLiveClientVersion is the client version sent with the Codex model
 	// catalog request; the provider omits models that need a newer client.
 	codexLiveClientVersion = "0.159.0"
+	// metaModelsPath is the Muse Code model catalog. It sits at the root of the
+	// origin each Meta credential talks to, so its URL follows the credential's
+	// base URL rather than a fixed address.
+	metaModelsPath = "/muse-code/models"
 )
 
 // Provider model endpoints. Variables so tests can point them at a local server.
@@ -114,9 +121,30 @@ func liveModelsEnabled(cfg *config.Config, provider string) bool {
 		return cfg.Claude.LiveModels
 	case "codex":
 		return cfg.Codex.LiveModels
+	case "meta":
+		return cfg.Meta.LiveModels
 	default:
 		return false
 	}
+}
+
+// liveModelProvider returns the provider key when the provider can list the
+// credential's models: a Claude or Codex OAuth credential the control-plane
+// probe accepts, or any enabled Meta credential other than a meta-api-key
+// config entry. Signing in stores a Meta login as a file credential, and the
+// Meta executor supplies its request credential, minting an API key from a DCA
+// token when needed.
+func liveModelProvider(auth *coreauth.Auth) (string, bool) {
+	if provider, ok := oauthProbeProvider(auth); ok {
+		return provider, true
+	}
+	if auth == nil || auth.Disabled || strings.TrimSpace(auth.ID) == "" {
+		return "", false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") || coreauth.IsConfigAPIKeyAuth(auth) {
+		return "", false
+	}
+	return "meta", true
 }
 
 // withLiveModels appends the models the provider reported for the credential
@@ -132,7 +160,7 @@ func (s *Service) withLiveModels(a *coreauth.Auth, provider string, models []*Mo
 	if !liveModelsEnabled(cfg, provider) {
 		return models
 	}
-	if _, ok := oauthProbeProvider(a); !ok {
+	if _, ok := liveModelProvider(a); !ok {
 		return models
 	}
 	additions := liveModelAdditions.get(a.ID)
@@ -154,7 +182,7 @@ func (s *Service) withLiveModels(a *coreauth.Auth, provider string, models []*Mo
 	return models
 }
 
-// startLiveModelSync keeps the model list of Claude and Codex OAuth credentials
+// startLiveModelSync keeps the model list of Claude, Codex and Meta credentials
 // in step with what the provider reports for each account.
 func (s *Service) startLiveModelSync(ctx context.Context) {
 	if s == nil || s.coreManager == nil {
@@ -206,7 +234,7 @@ func (s *Service) syncLiveModels(ctx context.Context, nextSync map[string]time.T
 		if ctx.Err() != nil {
 			return
 		}
-		provider, ok := oauthProbeProvider(auth)
+		provider, ok := liveModelProvider(auth)
 		if !ok {
 			continue
 		}
@@ -267,9 +295,42 @@ func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provi
 			log.Infof("live models: Codex client model catalog updated from credential %s", auth.ID)
 		}
 		return parseCodexLiveModels(body), nil
+	case "meta":
+		body, errGet := s.metaModelsGET(ctx, auth)
+		if errGet != nil {
+			return nil, errGet
+		}
+		return parseMetaLiveModels(body), nil
 	default:
 		return nil, nil
 	}
+}
+
+// metaModelsGET reads the Muse Code model catalog with one Meta credential. The
+// request goes through the Meta executor, which supplies the credential as it
+// does for the Muse Code relay.
+func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, oauthProbeTimeout)
+	defer cancel()
+
+	endpoint, errURL := api.MuseCodeURL(auth, metaModelsPath)
+	if errURL != nil {
+		return nil, errURL
+	}
+	headers := make(http.Header)
+	headers.Set("Accept", "application/json")
+	req, errRequest := s.coreManager.NewHttpRequest(probeCtx, auth, http.MethodGet, endpoint, nil, headers)
+	if errRequest != nil {
+		return nil, fmt.Errorf("create request: %w", errRequest)
+	}
+	resp, errDo := s.coreManager.HttpRequest(probeCtx, auth, req)
+	if errDo != nil {
+		return nil, fmt.Errorf("request failed: %w", errDo)
+	}
+	return readProbeBody(resp)
 }
 
 // parseClaudeLiveModels reads the Anthropic model list response.
@@ -335,6 +396,54 @@ func parseCodexLiveModels(body []byte) []liveModel {
 	return models
 }
 
+// parseMetaLiveModels reads the Muse Code model catalog response. Models Meta
+// hides from clients, and models that do not answer in text, are skipped.
+func parseMetaLiveModels(body []byte) []liveModel {
+	var models []liveModel
+	gjson.GetBytes(body, "data").ForEach(func(_, entry gjson.Result) bool {
+		id := strings.TrimSpace(entry.Get("id").String())
+		museCode := entry.Get("metadata.muse-code")
+		if id == "" || museCode.Get("is_hidden").Bool() {
+			return true
+		}
+		if outputs := museCode.Get("modalities.output"); outputs.IsArray() && !gjsonArrayContains(outputs, "text") {
+			return true
+		}
+		model := liveModel{
+			id:                  id,
+			displayName:         strings.TrimSpace(museCode.Get("name").String()),
+			description:         strings.TrimSpace(museCode.Get("description").String()),
+			created:             entry.Get("created").Int(),
+			contextLength:       int(museCode.Get("limit.context").Int()),
+			maxCompletionTokens: int(museCode.Get("limit.output").Int()),
+		}
+		museCode.Get("variants").ForEach(func(effort, _ gjson.Result) bool {
+			if value := strings.TrimSpace(effort.String()); value != "" {
+				model.thinkingLevels = append(model.thinkingLevels, value)
+			}
+			return true
+		})
+		museCode.Get("modalities.input").ForEach(func(_, modality gjson.Result) bool {
+			if value := strings.TrimSpace(modality.String()); value != "" {
+				model.inputModalities = append(model.inputModalities, value)
+			}
+			return true
+		})
+		models = append(models, model)
+		return true
+	})
+	return models
+}
+
+func gjsonArrayContains(values gjson.Result, target string) bool {
+	found := false
+	values.ForEach(func(_, value gjson.Result) bool {
+		found = strings.EqualFold(strings.TrimSpace(value.String()), target)
+		return !found
+	})
+	return found
+}
+
 // liveModelAdditionsFor builds definitions for the discovered models that the
 // catalog list for this credential does not carry.
 func liveModelAdditionsFor(provider string, auth *coreauth.Auth, discovered []liveModel) []*ModelInfo {
@@ -382,6 +491,8 @@ func catalogModelsForLiveSync(provider, codexPlan string) []*ModelInfo {
 		default:
 			return registry.GetCodexProModels()
 		}
+	case "meta":
+		return registry.GetMetaModels()
 	default:
 		return nil
 	}
@@ -395,9 +506,12 @@ func liveModelInfo(provider string, model liveModel, catalog []*ModelInfo) *Mode
 	info := registry.CloneModelInfo(closestCatalogModel(model.id, catalog))
 	if info == nil {
 		info = &ModelInfo{Object: "model"}
-		if provider == "claude" {
+		switch provider {
+		case "claude":
 			info.OwnedBy, info.Type = "anthropic", "claude"
-		} else {
+		case "meta":
+			info.OwnedBy, info.Type = "meta", "meta"
+		default:
 			info.OwnedBy, info.Type = "openai", "openai"
 		}
 	}
