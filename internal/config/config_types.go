@@ -403,6 +403,18 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// FillFirstOrder chooses which credential the fill-first strategy drains first.
+	// "id" (default) uses the lowest credential ID. "soonest-reset" uses the credential
+	// whose longest quota window resets soonest, so quota that is about to expire is
+	// spent before it is lost. Ignored by the other strategies.
+	FillFirstOrder string `yaml:"fill-first-order,omitempty" json:"fill-first-order,omitempty"`
+
+	// QuotaRefreshInterval is how often idle Claude and Codex OAuth credentials have
+	// their quota windows refreshed from the provider usage endpoint, so reset times
+	// are known before a credential is used. It only runs with fill-first-order
+	// "soonest-reset". Default: 30m. Minimum: 1m. "0" or "off" disables it.
+	QuotaRefreshInterval string `yaml:"quota-refresh-interval,omitempty" json:"quota-refresh-interval,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
