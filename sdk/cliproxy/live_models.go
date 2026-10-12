@@ -52,9 +52,17 @@ type liveModel struct {
 	contextLength       int
 	maxCompletionTokens int
 	thinkingLevels      []string
-	inputModalities     []string
-	plans               []string
+	// noThinking marks a model the provider reports as not reasoning, so it must
+	// not inherit reasoning levels from a catalog model.
+	noThinking      bool
+	inputModalities []string
+	plans           []string
 }
+
+// metaEffortOrder is the thinking package's standard level order. Meta's
+// reasoning variants are kept in it, lowest first, because the lowest level
+// stands in when a client turns reasoning off; other names are dropped.
+var metaEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
 // liveModelCache holds, per credential, the models the provider reports that
 // the model catalog does not list.
@@ -300,6 +308,11 @@ func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provi
 		if errGet != nil {
 			return nil, errGet
 		}
+		// An answer without the list is not an empty catalog; failing keeps the
+		// models found last time and retries after the backoff.
+		if !gjson.GetBytes(body, "data").IsArray() {
+			return nil, fmt.Errorf("model catalog response has no data list")
+		}
 		return parseMetaLiveModels(body), nil
 	default:
 		return nil, nil
@@ -308,7 +321,9 @@ func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provi
 
 // metaModelsGET reads the Muse Code model catalog with one Meta credential. The
 // request goes through the Meta executor, which supplies the credential as it
-// does for the Muse Code relay.
+// does for the Muse Code relay. A login that holds only a DCA token gets its API
+// key minted through the manager first, which saves it, so the sync does not
+// mint a new key on every read.
 func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -316,6 +331,17 @@ func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byt
 	probeCtx, cancel := context.WithTimeout(ctx, oauthProbeTimeout)
 	defer cancel()
 
+	if registered, ok := s.coreManager.Executor("meta"); ok {
+		if preparer, ok := registered.(coreauth.RequestAuthPreparer); ok {
+			prepared, errPrepare := s.coreManager.PrepareRequestAuth(probeCtx, preparer, auth)
+			if errPrepare != nil {
+				return nil, fmt.Errorf("prepare credential: %w", errPrepare)
+			}
+			if prepared != nil {
+				auth = prepared
+			}
+		}
+	}
 	endpoint, errURL := api.MuseCodeURL(auth, metaModelsPath)
 	if errURL != nil {
 		return nil, errURL
@@ -396,14 +422,16 @@ func parseCodexLiveModels(body []byte) []liveModel {
 	return models
 }
 
-// parseMetaLiveModels reads the Muse Code model catalog response. Models Meta
-// hides from clients, and models that do not answer in text, are skipped.
+// parseMetaLiveModels reads the Muse Code model catalog response. Only Muse
+// models with Muse Code metadata are taken, so a model ID another provider
+// serves is never routed to Meta. Models Meta hides from clients, and models
+// that do not answer in text, are skipped.
 func parseMetaLiveModels(body []byte) []liveModel {
 	var models []liveModel
 	gjson.GetBytes(body, "data").ForEach(func(_, entry gjson.Result) bool {
 		id := strings.TrimSpace(entry.Get("id").String())
 		museCode := entry.Get("metadata.muse-code")
-		if id == "" || museCode.Get("is_hidden").Bool() {
+		if !strings.HasPrefix(strings.ToLower(id), "muse-") || !museCode.Exists() || museCode.Get("is_hidden").Bool() {
 			return true
 		}
 		if outputs := museCode.Get("modalities.output"); outputs.IsArray() && !gjsonArrayContains(outputs, "text") {
@@ -417,12 +445,23 @@ func parseMetaLiveModels(body []byte) []liveModel {
 			contextLength:       int(museCode.Get("limit.context").Int()),
 			maxCompletionTokens: int(museCode.Get("limit.output").Int()),
 		}
-		museCode.Get("variants").ForEach(func(effort, _ gjson.Result) bool {
-			if value := strings.TrimSpace(effort.String()); value != "" {
-				model.thinkingLevels = append(model.thinkingLevels, value)
+		efforts := make(map[string]bool)
+		museCode.Get("variants").ForEach(func(name, variant gjson.Result) bool {
+			effort := strings.TrimSpace(variant.Get("reasoningEffort").String())
+			if effort == "" {
+				effort = strings.TrimSpace(name.String())
 			}
+			efforts[strings.ToLower(effort)] = true
 			return true
 		})
+		for _, level := range metaEffortOrder {
+			if efforts[level] {
+				model.thinkingLevels = append(model.thinkingLevels, level)
+			}
+		}
+		if reasoning := museCode.Get("reasoning"); reasoning.Exists() && !reasoning.Bool() {
+			model.noThinking, model.thinkingLevels = true, nil
+		}
 		museCode.Get("modalities.input").ForEach(func(_, modality gjson.Result) bool {
 			if value := strings.TrimSpace(modality.String()); value != "" {
 				model.inputModalities = append(model.inputModalities, value)
@@ -533,7 +572,9 @@ func liveModelInfo(provider string, model liveModel, catalog []*ModelInfo) *Mode
 	if model.maxCompletionTokens > 0 {
 		info.MaxCompletionTokens = model.maxCompletionTokens
 	}
-	if len(model.thinkingLevels) > 0 {
+	if model.noThinking {
+		info.Thinking = nil
+	} else if len(model.thinkingLevels) > 0 {
 		info.Thinking = &registry.ThinkingSupport{Levels: append([]string(nil), model.thinkingLevels...)}
 	}
 	if len(model.inputModalities) > 0 {

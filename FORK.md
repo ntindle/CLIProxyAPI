@@ -65,7 +65,10 @@ the login talks to), read with the login's own key. Models Meta hides from clien
 that do not answer in text, are skipped. The catalog is what the Muse CLI shows, through the
 [Muse Code endpoints](#muse-code-endpoints), so without this a new Muse model shows up in Muse
 and the proxy refuses it with `unknown provider for model` until the bundled catalog catches up.
-Meta API keys configured under `meta-api-key` keep their configured model list.
+Only `muse-` models with Muse Code metadata are taken, and their reasoning levels are Meta's
+variants in the standard order. A login that holds only a DCA token has its API key minted and
+saved before the first read. Meta API keys configured under `meta-api-key` are left alone: they keep
+their configured models, or the bundled catalog when they configure none.
 
 ### Key scopes
 
