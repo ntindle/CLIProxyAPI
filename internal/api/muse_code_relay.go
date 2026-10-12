@@ -115,6 +115,12 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 	_, _ = c.Writer.Write(upstreamBody)
 }
 
+// MuseCodeURL returns the address of a Muse Code endpoint, such as
+// /muse-code/models, on the origin the Meta credential talks to.
+func MuseCodeURL(selected *auth.Auth, path string) (string, error) {
+	return museCodeUpstreamURL(selected, path, "")
+}
+
 // museCodeUpstreamURL maps a relayed request onto the origin the credential
 // talks to. Muse Code endpoints live at the root of that origin, beside the
 // versioned API the credential's base URL names.

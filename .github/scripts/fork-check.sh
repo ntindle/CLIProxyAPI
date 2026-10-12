@@ -39,7 +39,8 @@ require_hook() {
 }
 require_hook sdk/cliproxy/service_lifecycle.go 's.startQuotaRefresher(ctx)'
 require_hook sdk/cliproxy/service_lifecycle.go 's.startLiveModelSync(ctx)'
-require_hook sdk/cliproxy/service_models.go 's.withLiveModels(a, provider, models)' 2
+require_hook sdk/cliproxy/service_models.go 's.withLiveModels(a, provider, models)' 3
+require_hook internal/config/config_v8.go '{"meta", "oauth.providers.meta"}'
 require_hook sdk/cliproxy/service_config.go 'coreauth.SoonestResetSelector{}'
 require_hook sdk/cliproxy/auth/conductor_selection.go '*SoonestResetSelector' 2
 require_hook internal/registry/codex_client_models.go 'codexClientLiveOverlay.apply(data)'

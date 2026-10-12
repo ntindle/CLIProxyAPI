@@ -157,6 +157,13 @@ type DevinConfig struct {
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 
+// MetaConfig configures provider-wide Meta behavior.
+type MetaConfig struct {
+	// LiveModels discovers the models each Meta OAuth credential can use from the
+	// provider and adds the ones the model catalog does not list yet. Default is false.
+	LiveModels bool `yaml:"live-models,omitempty" json:"live-models,omitempty"`
+}
+
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.

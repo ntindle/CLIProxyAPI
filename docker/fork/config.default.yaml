@@ -60,6 +60,9 @@ oauth:
       websockets: true
       # Pick up new Codex models from ChatGPT without waiting for a catalog release.
       live-models: true
+    meta:
+      # Pick up new Muse models from Meta without waiting for a catalog release.
+      live-models: true
 
 observability:
   logs:
