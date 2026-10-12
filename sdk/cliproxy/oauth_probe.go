@@ -116,7 +116,7 @@ func (s *Service) oauthProbeGET(ctx context.Context, cfg *config.Config, provide
 func readProbeBody(resp *http.Response) ([]byte, error) {
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Debugf("oauth probe: close response body: %v", errClose)
+			log.Debugf("provider probe: close response body: %v", errClose)
 		}
 	}()
 	body, errRead := io.ReadAll(io.LimitReader(resp.Body, oauthProbeMaxBody))

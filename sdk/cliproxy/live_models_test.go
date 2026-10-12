@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -58,23 +59,34 @@ func TestForkParseLiveModels(t *testing.T) {
 func TestForkParseMetaLiveModels(t *testing.T) {
 	models := parseMetaLiveModels([]byte(`{"object":"list","data":[
 		{"id":"muse-live-9","object":"model","created":1791662408,"owned_by":"meta","metadata":{"muse-code":{
-		 "name":"Muse Live 9","description":"Live model","is_hidden":false,
+		 "name":"Muse Live 9","description":"Live model","is_hidden":false,"reasoning":true,
 		 "modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":1007997,"output":128000},
-		 "variants":{"minimal":{"reasoningEffort":"minimal"},"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"max"}}}}},
+		 "variants":{"max":{"reasoningEffort":"max"},"fast":{"reasoningEffort":"minimal"},"high":{},"turbo":{"reasoningEffort":"turbo"}}}}},
+		{"id":"muse-plain-9","metadata":{"muse-code":{"reasoning":false,"modalities":{"output":["text"]},"variants":{"low":{"reasoningEffort":"low"}}}}},
 		{"id":"muse-hidden-9","metadata":{"muse-code":{"is_hidden":true,"modalities":{"output":["text"]}}}},
 		{"id":"muse-image-9","metadata":{"muse-code":{"modalities":{"input":["text"],"output":["image"]}}}},
+		{"id":"gpt-9-live","metadata":{"muse-code":{"modalities":{"output":["text"]}}}},
 		{"id":"muse-bare-9"},
 		{"id":""}
 	]}`))
-	if len(models) != 2 || models[0].id != "muse-live-9" || models[1].id != "muse-bare-9" {
-		t.Fatalf("meta models = %+v, want the visible text model and the bare entry", models)
+	if len(models) != 2 || models[0].id != "muse-live-9" || models[1].id != "muse-plain-9" {
+		t.Fatalf("meta models = %+v, want the two visible Muse text models", models)
 	}
 	got := models[0]
 	if got.displayName != "Muse Live 9" || got.description != "Live model" || got.created != 1791662408 || got.contextLength != 1007997 || got.maxCompletionTokens != 128000 {
 		t.Fatalf("meta model = %+v", got)
 	}
-	if len(got.thinkingLevels) != 3 || got.thinkingLevels[0] != "minimal" || got.thinkingLevels[2] != "max" || len(got.inputModalities) != 2 {
-		t.Fatalf("meta model lists = %+v", got)
+	// Variants are read by their reasoningEffort (or name), in the standard order,
+	// and names the thinking levels do not know are dropped.
+	if levels := strings.Join(got.thinkingLevels, ","); levels != "minimal,high,max" || len(got.inputModalities) != 2 || got.noThinking {
+		t.Fatalf("meta model levels = %q, modalities = %v, noThinking = %v", levels, got.inputModalities, got.noThinking)
+	}
+	plain := models[1]
+	if !plain.noThinking || len(plain.thinkingLevels) != 0 {
+		t.Fatalf("model without reasoning = %+v, want no reasoning levels", plain)
+	}
+	if info := liveModelInfo("meta", plain, internalregistry.GetMetaModels()); info.Thinking != nil {
+		t.Fatalf("a model without reasoning inherited reasoning levels %+v", info.Thinking)
 	}
 }
 
@@ -331,6 +343,111 @@ func TestForkSyncLiveModelsRegistersMetaModels(t *testing.T) {
 	}
 	if authorization != "Bearer meta-minted-key" || clientID != "tbh:tui" {
 		t.Fatalf("catalog request carried Authorization %q and X-Client-Id %q", authorization, clientID)
+	}
+}
+
+func TestForkSyncLiveModelsMintsMetaKeyOnce(t *testing.T) {
+	var mu sync.Mutex
+	mints := 0
+	var catalogAuthorization []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/muse-code/key":
+			mints++
+			_, _ = w.Write([]byte(`{"api_key":"LLM|minted-for-sync"}`))
+		case metaModelsPath:
+			catalogAuthorization = append(catalogAuthorization, r.Header.Get("Authorization"))
+			_, _ = w.Write([]byte(`{"data":[{"id":"muse-mint-sync-test","metadata":{"muse-code":{"modalities":{"output":["text"]}}}}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL+"/muse-code/key")
+
+	ctx := context.Background()
+	cfg := &internalconfig.Config{}
+	cfg.Meta.LiveModels = true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(runtimeexecutor.NewMetaExecutor(cfg))
+	authID := "live-sync-meta-dca"
+	if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), &coreauth.Auth{
+		ID: authID, Provider: "meta", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"base_url": server.URL + "/v1", "auth_kind": "oauth", "source_backend": "file", "source": "/auths/meta-dca.json"},
+		Metadata:   map[string]any{"type": "meta", "access_token": "dca:sync-test", "dca_token": "dca:sync-test"},
+	}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	t.Cleanup(func() {
+		GlobalModelRegistry().UnregisterClient(authID)
+		liveModelAdditions.set(authID, nil)
+	})
+	service := &Service{cfg: cfg, coreManager: manager}
+	nextSync := make(map[string]time.Time)
+	now := time.Now()
+
+	service.syncLiveModels(ctx, nextSync, now)
+	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncInterval+time.Second))
+
+	if registeredModel(t, authID, "muse-mint-sync-test") == nil {
+		t.Fatal("the discovered Meta model was not registered")
+	}
+	stored, ok := manager.GetByID(authID)
+	if !ok || stored.Attributes["api_key"] != "LLM|minted-for-sync" {
+		t.Fatal("the minted key was not saved on the credential")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if mints != 1 {
+		t.Fatalf("mints = %d over two reads, want 1", mints)
+	}
+	if len(catalogAuthorization) != 2 || catalogAuthorization[0] != "Bearer LLM|minted-for-sync" || catalogAuthorization[1] != catalogAuthorization[0] {
+		t.Fatalf("catalog reads carried %q, want the minted key both times", catalogAuthorization)
+	}
+}
+
+func TestForkSyncLiveModelsKeepsMetaModelsWhenTheListIsMissing(t *testing.T) {
+	var mu sync.Mutex
+	answer := `{"data":[{"id":"muse-kept-test","metadata":{"muse-code":{"modalities":{"output":["text"]}}}}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	cfg := &internalconfig.Config{}
+	cfg.Meta.LiveModels = true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(runtimeexecutor.NewMetaExecutor(cfg))
+	authID := "live-sync-meta-kept"
+	if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), &coreauth.Auth{
+		ID: authID, Provider: "meta", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "meta-key", "auth_kind": "oauth", "source_backend": "file", "source": "/auths/meta-kept.json"},
+	}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	t.Cleanup(func() {
+		GlobalModelRegistry().UnregisterClient(authID)
+		liveModelAdditions.set(authID, nil)
+	})
+	service := &Service{cfg: cfg, coreManager: manager}
+	nextSync := make(map[string]time.Time)
+	now := time.Now()
+
+	service.syncLiveModels(ctx, nextSync, now)
+	if registeredModel(t, authID, "muse-kept-test") == nil {
+		t.Fatal("the discovered Meta model was not registered")
+	}
+	mu.Lock()
+	answer = `{"error":"maintenance"}`
+	mu.Unlock()
+	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncInterval+time.Second))
+	if registeredModel(t, authID, "muse-kept-test") == nil {
+		t.Fatal("an answer without the model list dropped the models found before")
 	}
 }
 
