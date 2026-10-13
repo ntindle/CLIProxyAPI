@@ -163,6 +163,44 @@ func TestExecutionErrorMessageDoesNotTrustResponseBodyWithoutMarker(t *testing.T
 	}
 }
 
+func TestWriteErrorResponseDirectResponseKeepsCooldownRetryAfter(t *testing.T) {
+	refusal := `{"error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted.","resets_at":1791881152,"type":"rate_limit_error"}}`
+	tests := []struct {
+		name     string
+		upstream http.Header
+		want     string
+	}{
+		{name: "cooldown", upstream: http.Header{"Content-Type": {"application/json"}}, want: "90"},
+		{name: "upstream wins", upstream: http.Header{"Content-Type": {"application/json"}, "Retry-After": {"30"}}, want: "30"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+			NewBaseAPIHandlers(nil, nil).WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode:     http.StatusTooManyRequests,
+				Error:          coreauth.NewModelCooldownError("muse-wonder-1.0-contributor", "", 90*time.Second),
+				DirectResponse: true,
+				Body:           []byte(refusal),
+				Headers:        tt.upstream,
+			})
+
+			if recorder.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+			}
+			if got := recorder.Body.String(); got != refusal {
+				t.Fatalf("body = %q, want the refusal verbatim", got)
+			}
+			if got := recorder.Header().Values("Retry-After"); len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("Retry-After = %q, want [%s]", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInternalConcurrencyBusyWritesRetryAfterWithoutPassthrough(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

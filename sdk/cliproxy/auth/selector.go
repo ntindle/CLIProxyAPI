@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -85,6 +86,9 @@ type modelCooldownError struct {
 	resetIn  time.Duration
 	provider string
 	cause    error
+	// refusal is the upstream quota refusal clients get instead of the
+	// model_cooldown body; see upstreamQuotaRefusal.
+	refusal []byte
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
@@ -105,11 +109,46 @@ func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duratio
 		provider: provider,
 		resetIn:  resetIn,
 		cause:    cause,
+		refusal:  upstreamQuotaRefusal(cause, time.Now()),
 	}
+}
+
+// upstreamQuotaRefusal returns the upstream's own 429 body when the credentials
+// cool down after a quota refusal that names its reset, such as Meta's
+// {"error":{"code":"rate_limit_exceeded","resets_at":…}}. A client that knows
+// the provider's refusal acts on it: Muse stops at once and reports the reset,
+// while the model_cooldown body reads as a plain rate limit it retries for minutes.
+func upstreamQuotaRefusal(cause error, now time.Time) []byte {
+	var authErr *Error
+	if !errors.As(cause, &authErr) || authErr == nil || authErr.HTTPStatus != http.StatusTooManyRequests {
+		return nil
+	}
+	body := strings.TrimSpace(authErr.Message)
+	if !gjson.Valid(body) || gjson.Get(body, "error.code").String() != "rate_limit_exceeded" {
+		return nil
+	}
+	resetsAt := gjson.Get(body, "error.resets_at")
+	if resetsAt.Type != gjson.Number || !time.Unix(resetsAt.Int(), 0).After(now) {
+		return nil
+	}
+	return []byte(body)
 }
 
 func (e *modelCooldownError) IsModelCooldown() bool {
 	return true
+}
+
+// DirectResponse reports whether clients get the upstream quota refusal verbatim.
+func (e *modelCooldownError) DirectResponse() bool {
+	return e != nil && len(e.refusal) > 0
+}
+
+// ResponseBody returns the upstream quota refusal DirectResponse passes through.
+func (e *modelCooldownError) ResponseBody() []byte {
+	if e == nil {
+		return nil
+	}
+	return e.refusal
 }
 
 func (e *modelCooldownError) Unwrap() error {
