@@ -181,7 +181,7 @@ refer) answer `501` without touching a credential.
 The Muse CLI asks its endpoint for more than `/v1/responses`: it reads its model catalog from
 `/muse-code/models` at the root of the same origin and does not start without it. The fork serves
 these Muse Code endpoints by forwarding them to Meta with a Meta credential and returning the
-answer unchanged:
+answer unchanged, apart from the [models an alias takes over](#aliased-muse-models):
 
 | Endpoint | Used for |
 | --- | --- |
@@ -210,6 +210,30 @@ to an endpoint named there, not to one passed with `--base-url`) and give it a c
 ```bash
 export META_API_KEY="sk-muse-77b0..."
 ```
+
+#### Aliased Muse models
+
+An `oauth-model-alias` entry on the `meta` channel whose alias is a model Meta lists takes that
+model's ID over: a request for the ID runs the alias's model instead. The catalog the proxy
+returns marks such an entry hidden (`is_hidden`), when the model the alias runs is in the same
+catalog, so Muse's model picker, and every client that lists Muse's models, offers only what a
+request would reach. Muse still accepts a hidden ID named explicitly, and the alias then runs it.
+
+Aliases from each Muse model to its `-contributor` twin send every Muse request in Contributor
+mode, which Meta's subscriptions give more usage for (Meta may train on the content):
+
+```yaml
+oauth-model-alias:
+  meta:
+    - name: "muse-wonder-1.0-contributor"
+      alias: "muse-wonder-1.0"
+      fork: true
+```
+
+`fork: true` keeps the `-contributor` ID itself. While the Meta channel has an alias, the proxy
+does not pass a conditional catalog request (`If-None-Match`) on to Meta, and leaves out Meta's
+`Etag` and `Last-Modified` when it changed the catalog. A Meta API key under `meta-api-key` gets
+no OAuth model alias, so its catalog is left alone.
 
 ### Meta subscription usage
 
