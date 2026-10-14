@@ -45,7 +45,7 @@ require_hook sdk/cliproxy/service_config.go 'coreauth.SoonestResetSelector{}'
 require_hook sdk/cliproxy/auth/conductor_selection.go '*SoonestResetSelector' 2
 require_hook internal/registry/codex_client_models.go 'codexClientLiveOverlay.apply(data)'
 require_hook internal/watcher/synthesizer/file.go 'cfg.Codex.Websockets'
-require_hook sdk/api/handlers/claude/code_handlers.go 'handlers.NativeProviderModels(h.Cfg, h.Models(), "claude")'
+require_hook sdk/api/handlers/claude/code_handlers.go 'handlers.NativeProviderModels(cfg, h.Models(), "claude")'
 require_hook sdk/api/handlers/openai/codex_client_models.go 'handlers.NativeProviderModels(h.Cfg, models, "codex")'
 require_hook sdk/api/handlers/handlers_execution.go 'h.scopeProviders(ctx, originalRequestedModel)(h.providersForExecution(' 2
 require_hook sdk/api/handlers/handlers_stream.go 'h.scopeProviders(ctx, originalRequestedModel)(h.providersForExecution('
