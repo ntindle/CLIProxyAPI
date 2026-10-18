@@ -124,6 +124,34 @@ type ClaudeConfig struct {
 	// LiveModels discovers the models each Claude OAuth credential can use from the
 	// provider and adds the ones the model catalog does not list yet. Default is false.
 	LiveModels bool `yaml:"live-models,omitempty" json:"live-models,omitempty"`
+	// SessionDatePinDays retains the cloaked currentDate pin per session for
+	// this many days, independently of continuity expiry and credential
+	// switches. A nil value (unset) defaults to 7 days; an explicit 0 keeps
+	// the continuity-scoped pin (1h lifetime).
+	SessionDatePinDays *int `yaml:"session-date-pin-days" json:"session-date-pin-days"`
+}
+
+// DefaultClaudeSessionDatePinDays is the session date pin retention applied
+// when session-date-pin-days is not configured.
+const DefaultClaudeSessionDatePinDays = 7
+
+// SessionDatePinRetention returns the configured session date pin retention.
+// An unset value defaults to 7 days; an explicit zero keeps the legacy
+// continuity-scoped behavior. Days are clamped so the duration cannot
+// overflow.
+func (c ClaudeConfig) SessionDatePinRetention() time.Duration {
+	days := DefaultClaudeSessionDatePinDays
+	if c.SessionDatePinDays != nil {
+		days = *c.SessionDatePinDays
+	}
+	if days <= 0 {
+		return 0
+	}
+	maxDays := int((time.Duration(math.MaxInt64) / (24 * time.Hour)))
+	if days > maxDays {
+		days = maxDays
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.

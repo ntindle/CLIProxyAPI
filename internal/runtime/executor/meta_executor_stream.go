@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -86,6 +88,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		var terminalDelivered bool
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			lines, errBridge := prepared.applyPatch.Stream(translatedLine)
 			if errBridge != nil {
@@ -117,16 +120,89 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			return true
 		}
+		var pendingEventLine []byte
+		var filteringSubscriptionUsage bool
+		var skipFilteredBlankLine bool
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if !bytes.HasPrefix(line, dataTag) {
+			trimmedLine := bytes.TrimSpace(line)
+			if bytes.HasPrefix(trimmedLine, metaEventTag) {
+				eventName := bytes.TrimSpace(trimmedLine[len(metaEventTag):])
+				if bytes.Equal(eventName, []byte(metaSubscriptionUsageEventType)) {
+					if pendingEventLine != nil {
+						if !emitTranslatedLine(pendingEventLine) {
+							return
+						}
+						pendingEventLine = nil
+					}
+					filteringSubscriptionUsage = true
+					skipFilteredBlankLine = true
+					continue
+				}
+				filteringSubscriptionUsage = false
+				skipFilteredBlankLine = false
+				if pendingEventLine != nil {
+					if !emitTranslatedLine(pendingEventLine) {
+						return
+					}
+				}
+				pendingEventLine = bytes.Clone(line)
+				continue
+			}
+			if !bytes.HasPrefix(trimmedLine, dataTag) {
+				if len(trimmedLine) == 0 {
+					filteringSubscriptionUsage = false
+					if skipFilteredBlankLine {
+						skipFilteredBlankLine = false
+						continue
+					}
+				}
+				if filteringSubscriptionUsage {
+					continue
+				}
+				skipFilteredBlankLine = false
+				if pendingEventLine != nil {
+					if !emitTranslatedLine(pendingEventLine) {
+						return
+					}
+					pendingEventLine = nil
+				}
 				if !emitTranslatedLine(bytes.Clone(line)) {
 					return
 				}
 				continue
 			}
-			eventData := bytes.TrimSpace(line[len(dataTag):])
+			eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
+			eventType := gjson.GetBytes(eventData, "type").String()
+			if isMetaSubscriptionUsageEvent(eventType, eventData) {
+				// The fork records quota for routing and preserves the typed event for
+				// Muse's Responses client. Other formats retain upstream filtering.
+				helps.ObserveMetaSubscriptionUsage(ctx, eventData)
+				if eventType == helps.MetaSubscriptionUsageEventType && prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+					if !emitTranslatedLine([]byte("event: "+eventType)) ||
+						!emitTranslatedLine(append([]byte("data: "), eventData...)) ||
+						!emitTranslatedLine(nil) {
+						return
+					}
+				}
+				pendingEventLine = nil
+				filteringSubscriptionUsage = false
+				skipFilteredBlankLine = true
+				continue
+			}
+			if filteringSubscriptionUsage {
+				if eventType == "" {
+					pendingEventLine = nil
+					if gjson.ValidBytes(eventData) {
+						filteringSubscriptionUsage = false
+					}
+					skipFilteredBlankLine = true
+					continue
+				}
+				filteringSubscriptionUsage = false
+			}
+			skipFilteredBlankLine = false
 			reporter.ObserveResponseModel(eventData)
 			if errEvent := metaStreamEventError(eventData); errEvent != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errEvent)
@@ -137,7 +213,6 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 				return
 			}
-			eventType := gjson.GetBytes(eventData, "type").String()
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -146,12 +221,25 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 					streamUsage.Observe(detail, true)
 				}
 				eventData = patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			case helps.MetaSubscriptionUsageEventType:
-				helps.ObserveMetaSubscriptionUsage(ctx, eventData)
+			}
+			if pendingEventLine != nil {
+				if !emitTranslatedLine(pendingEventLine) {
+					return
+				}
+				pendingEventLine = nil
 			}
 			if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
 				return
 			}
+			if eventType == "response.completed" || eventType == "response.incomplete" {
+				terminalDelivered = true
+			}
+		}
+		if pendingEventLine != nil {
+			if !emitTranslatedLine(pendingEventLine) {
+				return
+			}
+			pendingEventLine = nil
 		}
 		finishEvents, errFinish := prepared.applyPatch.FinishStream()
 		if errFinish != nil {
@@ -176,6 +264,9 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			if terminalDelivered && errors.Is(errScan, context.Canceled) {
+				return
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {

@@ -229,8 +229,11 @@ rate-limit headers are recorded: `X-Meta-Window-Used-Percent`, `X-Meta-Window-Mi
 `auth-files` list, which is what T3 Code's usage view reads, and the soonest-reset order uses
 them. A credential reports nothing until something has used it through the proxy.
 
-Responses clients also receive the event, although it arrives after the terminal event; the Muse
-CLI reads it to show its quota. Every other frame after a terminal event is still dropped.
+Responses clients also receive the typed event, although it arrives after the terminal event; the Muse
+CLI reads it to show its quota. Other response formats and non-stream responses retain upstream
+subscription-telemetry filtering. Every other frame after a terminal event is still dropped.
+The v8.0.33 merge keeps this deliberate exception to upstream global filtering; the multi-format
+executor test and the fork quota tests cover it.
 
 Reloading a credential file from disk keeps its last observation, since the file does not store
 it. This applies to every provider.
