@@ -140,10 +140,10 @@ func (p *AccountPoolPolicy) tier(a *Auth) int {
 // availableAuthsForPoolSelector keeps quota, cooldown and concurrency on the
 // original credential. Pool order takes precedence over credential priority;
 // affinity is retained within the first currently available pool.
-func (m *Manager) availableAuthsForPoolSelector(ctx context.Context, selector Selector, auths []*Auth, provider, model string, now time.Time) ([]*Auth, []*Auth, error) {
+func (m *Manager) availableAuthsForPoolSelector(ctx context.Context, selector Selector, auths []*Auth, provider, model string, now time.Time, schedulerAcross bool) ([]*Auth, []*Auth, error) {
 	policy := accountPoolsFromContext(ctx)
 	if policy == nil {
-		return m.availableAuthsForSelector(selector, auths, provider, model, now)
+		return m.availableAuthsForSelector(selector, auths, provider, model, now, schedulerAcross)
 	}
 	weightedSelector := selector
 	if affinity, ok := selector.(*SessionAffinitySelector); ok {
@@ -168,7 +168,7 @@ func (m *Manager) availableAuthsForPoolSelector(ctx context.Context, selector Se
 		}
 		tierAuths = append(tierAuths, a)
 	}
-	return m.availableAuthsForSelector(selector, tierAuths, provider, model, now)
+	return m.availableAuthsForSelector(selector, tierAuths, provider, model, now, schedulerAcross)
 }
 
 func accountPoolAffinityNamespace(provider string, metadata map[string]any) string {
