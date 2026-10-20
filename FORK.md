@@ -69,10 +69,11 @@ oauth:
         auth-files: []          # only these auth files or credential IDs; empty means every Codex login
 ```
 
-Every minute it looks at each Codex OAuth login. A login counts as blocked when the proxy holds
-it in a quota cooldown (after a `usage_limit_reached` refusal) or its latest rate-limit headers
-show a fully used window. A plan that spends ChatGPT credits past its limit keeps answering, so
-there the headers are the only sign. A login that is not blocked costs no request.
+Every minute it looks at each Codex OAuth login that has its ChatGPT account ID (a reset belongs
+to one workspace). A login counts as blocked when the proxy holds it in a quota cooldown (after a
+`usage_limit_reached` refusal) or its latest rate-limit headers show a fully used window. A plan
+that spends ChatGPT credits past its limit keeps answering, so there the headers are the only
+sign. A login that is not blocked costs no request.
 
 For a blocked login it reads `/backend-api/wham/usage` and goes ahead only when ChatGPT also
 says the login is limited and a reset applies. It redeems a reset when the block lasts at least
@@ -82,11 +83,20 @@ its allowance than the share of it that has passed: restarting that window would
 the reset frees.
 
 The reset spent is the one that expires first, through
-`/backend-api/wham/rate-limit-reset-credits/consume`. Its request ID is derived from the login and
-the credit, so a retry after a lost answer is reported as already redeemed instead of spending a
-second reset. After a reset the proxy clears the login's quota cooldown, reads its windows again
-and leaves it alone for 30 minutes. Each redemption is logged at info level with
-`codex reset credits:`; `dry-run` logs the same decision without redeeming.
+`/backend-api/wham/rate-limit-reset-credits/consume`. Just before, the setting and the login are
+read again, so turning the feature off or disabling the login stops a redemption already under
+way. The request ID is derived from the login and the credit, so a retry after a lost answer is
+reported as already redeemed instead of spending a second reset. After a reset the proxy clears
+the login's cooldown, reads its windows again and leaves it alone for 10 minutes.
+
+When the usage endpoint says a login is no longer limited while the proxy still holds it in a quota
+cooldown, the cooldown is lifted. That covers a reset whose answer was lost, one redeemed by hand,
+limits ChatGPT resets itself, and a refusal sent before a reset that lands after it. Lifting a
+cooldown works like the panel's reset-quota action: it clears every cooldown of the login, so a
+model that failed for another reason is tried once more before its own cooldown returns.
+
+Each redemption and each lifted cooldown is logged at info level with `codex reset credits:`;
+`dry-run` logs the same decisions and changes nothing.
 
 ### Live models
 

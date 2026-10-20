@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,9 +40,10 @@ const (
 	codexResetCreditsErrorBackoff    = 5 * time.Minute
 	codexResetCreditsWaitBackoff     = 15 * time.Minute
 	codexResetCreditsNoCreditBackoff = time.Hour
-	// codexResetCreditsRedeemGap keeps a credential from being redeemed twice for
-	// one block while the provider catches up with the first reset.
-	codexResetCreditsRedeemGap = 30 * time.Minute
+	// codexResetCreditsAfterRedeem is the pause after a reset: ChatGPT's usage shows a
+	// reset within seconds, and the next check lifts a cooldown that a refusal sent
+	// before the reset brought back.
+	codexResetCreditsAfterRedeem = 10 * time.Minute
 
 	codexResetCreditType = "codex_rate_limits"
 )
@@ -164,30 +167,54 @@ func (s *Service) checkCodexResetCredits(ctx context.Context, nextCheck map[stri
 	if !enabled {
 		return
 	}
+	// clock advances the sweep's start by the time spent so far, so each decision and
+	// backoff uses the time it is made at rather than when the sweep began.
+	started := time.Now()
+	clock := func() time.Time { return now.Add(time.Since(started)) }
 
 	known := make(map[string]struct{})
 	for _, auth := range s.coreManager.List() {
 		if ctx.Err() != nil {
 			return
 		}
-		if provider, ok := oauthProbeProvider(auth); !ok || provider != "codex" || !settings.covers(auth) {
+		if !codexResetCreditsEligible(auth, settings) {
 			continue
 		}
 		known[auth.ID] = struct{}{}
-		if next, pending := nextCheck[auth.ID]; pending && now.Before(next) {
+		at := clock()
+		if next, pending := nextCheck[auth.ID]; pending && at.Before(next) {
 			continue
 		}
-		blockedUntil, blocked := codexLocalBlock(auth, now)
+		blockedUntil, blocked := codexLocalBlock(auth, at)
 		if !blocked {
 			continue
 		}
-		nextCheck[auth.ID] = now.Add(s.considerCodexResetCredit(ctx, cfg, settings, auth, blockedUntil, now))
+		backoff := s.considerCodexResetCredit(ctx, cfg, settings, auth, blockedUntil, clock)
+		nextCheck[auth.ID] = clock().Add(backoff)
 	}
 	for id := range nextCheck {
 		if _, ok := known[id]; !ok {
 			delete(nextCheck, id)
 		}
 	}
+}
+
+// codexResetCreditsEligible reports whether a credential is a Codex OAuth login the
+// settings cover. A login without its ChatGPT account ID is left alone: a reset is
+// redeemed for one workspace, and without the ID ChatGPT would pick the default one.
+func codexResetCreditsEligible(auth *coreauth.Auth, settings codexResetCreditSettings) bool {
+	if provider, ok := oauthProbeProvider(auth); !ok || provider != "codex" {
+		return false
+	}
+	return codexAccountID(auth) != "" && settings.covers(auth)
+}
+
+func codexAccountID(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	accountID, _ := auth.Metadata["account_id"].(string)
+	return strings.TrimSpace(accountID)
 }
 
 // codexLocalBlock reports whether the proxy's own view of the credential says it
@@ -225,6 +252,12 @@ func codexLocalBlock(auth *coreauth.Auth, now time.Time) (time.Time, bool) {
 		}
 	}
 	return until, blocked
+}
+
+// codexCredentialQuotaHeld reports whether the proxy holds the whole credential in a
+// quota cooldown, which it does after a usage_limit_reached refusal.
+func codexCredentialQuotaHeld(auth *coreauth.Auth, now time.Time) bool {
+	return auth.Quota.Exceeded && strings.EqualFold(auth.Quota.Reason, "credential_quota") && auth.Quota.NextRecoverAt.After(now)
 }
 
 // codexInCooldown reports whether the proxy holds the credential, or any of its
@@ -329,33 +362,27 @@ func (u codexUsageState) behindPace(binding time.Duration, now time.Time) (corea
 }
 
 type codexResetCredit struct {
-	ID        string `json:"id"`
-	ResetType string `json:"reset_type"`
-	Status    string `json:"status"`
-	ExpiresAt string `json:"expires_at"`
-	expires   time.Time
+	id      string
+	expires time.Time
 }
 
 // soonestCodexResetCredit returns the available Codex reset that expires first.
 // A reset without an expiry sorts last.
 func soonestCodexResetCredit(body []byte) (codexResetCredit, bool) {
-	var payload struct {
-		Credits []codexResetCredit `json:"credits"`
-	}
-	if errDecode := json.Unmarshal(body, &payload); errDecode != nil {
+	credits := gjson.GetBytes(body, "credits")
+	if !credits.IsArray() {
 		return codexResetCredit{}, false
 	}
-	available := make([]codexResetCredit, 0, len(payload.Credits))
-	for _, credit := range payload.Credits {
-		if strings.TrimSpace(credit.ID) == "" || !strings.EqualFold(credit.Status, "available") ||
-			!strings.EqualFold(credit.ResetType, codexResetCreditType) {
-			continue
+	var available []codexResetCredit
+	credits.ForEach(func(_, item gjson.Result) bool {
+		id := strings.TrimSpace(item.Get("id").String())
+		if id == "" || !strings.EqualFold(item.Get("status").String(), "available") ||
+			!strings.EqualFold(item.Get("reset_type").String(), codexResetCreditType) {
+			return true
 		}
-		if parsed, errParse := time.Parse(time.RFC3339Nano, strings.TrimSpace(credit.ExpiresAt)); errParse == nil {
-			credit.expires = parsed
-		}
-		available = append(available, credit)
-	}
+		available = append(available, codexResetCredit{id: id, expires: codexResetCreditExpiry(item.Get("expires_at"))})
+		return true
+	})
 	if len(available) == 0 {
 		return codexResetCredit{}, false
 	}
@@ -369,10 +396,32 @@ func soonestCodexResetCredit(body []byte) (codexResetCredit, bool) {
 	return available[0], true
 }
 
+// codexResetCreditExpiry reads an expiry given as an RFC 3339 timestamp or as unix
+// seconds. Anything else counts as no expiry.
+func codexResetCreditExpiry(value gjson.Result) time.Time {
+	switch value.Type {
+	case gjson.Number:
+		if seconds := value.Int(); seconds > 0 {
+			return time.Unix(seconds, 0)
+		}
+	case gjson.String:
+		raw := strings.TrimSpace(value.String())
+		if parsed, errParse := time.Parse(time.RFC3339Nano, raw); errParse == nil {
+			return parsed
+		}
+		if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds > 0 {
+			return time.Unix(seconds, 0)
+		}
+	}
+	return time.Time{}
+}
+
 // considerCodexResetCredit decides about one blocked login, redeems a reset when
-// it is worth it, and returns how long to leave the login alone.
-func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Config, settings codexResetCreditSettings, auth *coreauth.Auth, localUntil time.Time, now time.Time) time.Duration {
+// it is worth it, and returns how long to leave the login alone. clock gives the
+// current time for each step.
+func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Config, settings codexResetCreditSettings, auth *coreauth.Auth, localUntil time.Time, clock func() time.Time) time.Duration {
 	label := codexResetCreditLabel(auth)
+	now := clock()
 	body, errUsage := s.oauthProbeGET(ctx, cfg, "codex", auth, codexUsageURL)
 	if errUsage != nil {
 		log.Debugf("codex reset credits: usage for %s: %v", label, errUsage)
@@ -382,22 +431,25 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 	usage := parseCodexUsageState(body, now)
 	until, binding, blocked := usage.block(localUntil, now)
 	if !blocked {
+		s.reconcileCodexCooldown(ctx, settings, auth.ID, label, now)
 		return codexResetCreditsWaitBackoff
 	}
 	if usage.applicableKnown && usage.applicable <= 0 {
 		return codexResetCreditsNoCreditBackoff
 	}
-	wait := until.Sub(now)
-	if wait < codexResetCreditsExpiringMinWait && wait < settings.minWait {
+	if wait := until.Sub(now); wait < codexResetCreditsExpiringMinWait && wait < settings.minWait {
 		return codexResetCreditsWaitBackoff
 	}
 	if window, behind := usage.behindPace(binding, now); behind {
 		log.Debugf("codex reset credits: %s is blocked for %s, but a reset would push back its %s window (%.0f%% used, reset %s)",
-			label, wait.Round(time.Minute), window.Duration, window.Used*100, window.ResetAt.Format(time.RFC3339))
+			label, until.Sub(now).Round(time.Minute), window.Duration, window.Used*100, window.ResetAt.Format(time.RFC3339))
 		return codexResetCreditsWaitBackoff
 	}
 
-	listing, errList := s.codexResetCreditRequest(ctx, cfg, auth, http.MethodGet, codexResetCreditsURL, nil)
+	listing, status, errList := s.codexResetCreditRequest(ctx, cfg, auth, http.MethodGet, codexResetCreditsURL, nil)
+	if errList == nil && (status < http.StatusOK || status >= http.StatusMultipleChoices) {
+		errList = fmt.Errorf("unexpected status %d", status)
+	}
 	if errList != nil {
 		log.Debugf("codex reset credits: listing for %s: %v", label, errList)
 		return codexResetCreditsErrorBackoff
@@ -406,11 +458,14 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 	if !found {
 		return codexResetCreditsNoCreditBackoff
 	}
+
+	// The requests above take time: decide on the block that is left now.
+	now = clock()
+	wait := until.Sub(now)
 	expiring := settings.expiringWithin > 0 && !credit.expires.IsZero() && credit.expires.Sub(now) <= settings.expiringWithin
 	if wait < settings.minWait && !(expiring && wait >= codexResetCreditsExpiringMinWait) {
 		return codexResetCreditsWaitBackoff
 	}
-
 	expiry := "no expiry"
 	if !credit.expires.IsZero() {
 		expiry = "expiring " + credit.expires.Format(time.RFC3339)
@@ -419,43 +474,95 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 		log.Infof("codex reset credits: dry run: would redeem a reset (%s) for %s, blocked for %s", expiry, label, wait.Round(time.Minute))
 		return codexResetCreditsWaitBackoff
 	}
+	// The setting or the credential may have changed while those requests ran.
+	current, currentCfg, allowed := s.codexResetCreditTarget(auth.ID)
+	if !allowed {
+		return codexResetCreditsWaitBackoff
+	}
 
-	requestID := uuid.NewSHA1(codexResetCreditRequestSpace, []byte(auth.ID+"\x00"+credit.ID)).String()
-	payload, _ := json.Marshal(map[string]string{"redeem_request_id": requestID, "credit_id": credit.ID})
-	answer, errConsume := s.codexResetCreditRequest(ctx, cfg, auth, http.MethodPost, codexResetCreditsConsumeURL, payload)
+	requestID := uuid.NewSHA1(codexResetCreditRequestSpace, []byte(current.ID+"\x00"+credit.id)).String()
+	payload, _ := json.Marshal(map[string]string{"redeem_request_id": requestID, "credit_id": credit.id})
+	answer, status, errConsume := s.codexResetCreditRequest(ctx, currentCfg, current, http.MethodPost, codexResetCreditsConsumeURL, payload)
 	if errConsume != nil {
 		log.Warnf("codex reset credits: redeeming a reset for %s: %v", label, errConsume)
 		return codexResetCreditsErrorBackoff
 	}
+	// A refusal carries its reason as a code as well, so the code decides, not the status.
 	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(answer, "code").String()))
 	switch code {
 	case "reset", "already_redeemed":
 		// A login spending ChatGPT credits past its limit has no cooldown to clear.
-		if current, ok := s.coreManager.GetByID(auth.ID); ok && codexInCooldown(current, time.Now()) {
-			if _, _, errReset := s.coreManager.ResetQuota(ctx, auth.ID); errReset != nil {
-				log.Warnf("codex reset credits: clearing the cooldown of %s: %v", label, errReset)
-			}
+		if latest, ok := s.coreManager.GetByID(current.ID); ok && codexInCooldown(latest, clock()) {
+			s.clearCodexCooldown(ctx, current.ID, label)
 		}
-		if refreshed, errRefresh := s.oauthProbeGET(ctx, cfg, "codex", auth, codexUsageURL); errRefresh == nil {
-			s.coreManager.ObserveQuotaSignals(auth.ID, "codex", codexUsageQuotaHeaders(refreshed), time.Now())
+		if refreshed, errRefresh := s.oauthProbeGET(ctx, currentCfg, "codex", current, codexUsageURL); errRefresh == nil {
+			s.coreManager.ObserveQuotaSignals(current.ID, "codex", codexUsageQuotaHeaders(refreshed), clock())
 		}
 		log.Infof("codex reset credits: redeemed a reset (%s) for %s, which was blocked for %s; %d window(s) reset",
 			expiry, label, wait.Round(time.Minute), gjson.GetBytes(answer, "windows_reset").Int())
-		return codexResetCreditsRedeemGap
+		return codexResetCreditsAfterRedeem
 	case "nothing_to_reset":
 		log.Infof("codex reset credits: ChatGPT found nothing to reset for %s", label)
 		return codexResetCreditsWaitBackoff
 	case "no_credit":
 		return codexResetCreditsNoCreditBackoff
 	default:
-		log.Warnf("codex reset credits: unexpected answer redeeming a reset for %s: %q", label, code)
+		log.Warnf("codex reset credits: unexpected answer (status %d) redeeming a reset for %s: %q", status, label, code)
 		return codexResetCreditsErrorBackoff
 	}
 }
 
+// reconcileCodexCooldown lifts the quota cooldown the proxy holds on a login that
+// ChatGPT no longer limits: a reset was redeemed (by an earlier check whose answer
+// was lost, or by hand), ChatGPT reset limits itself, or a refusal sent before a
+// reset brought the cooldown back. The check schedule spaces repeats out, so a
+// login reported free that keeps being refused does not flap.
+func (s *Service) reconcileCodexCooldown(ctx context.Context, settings codexResetCreditSettings, authID, label string, now time.Time) {
+	latest, ok := s.coreManager.GetByID(authID)
+	if !ok || latest == nil || latest.Disabled || !codexCredentialQuotaHeld(latest, now) {
+		return
+	}
+	if settings.dryRun {
+		log.Infof("codex reset credits: dry run: would clear the cooldown of %s, which ChatGPT no longer limits", label)
+		return
+	}
+	if s.clearCodexCooldown(ctx, authID, label) {
+		log.Infof("codex reset credits: cleared the cooldown of %s, which ChatGPT no longer limits", label)
+	}
+}
+
+// clearCodexCooldown lifts the proxy's cooldowns on a login. Like the management
+// reset-quota action it clears every cooldown of the login, so a model that failed
+// for another reason is tried once more before its own cooldown returns.
+func (s *Service) clearCodexCooldown(ctx context.Context, authID, label string) bool {
+	if _, _, errReset := s.coreManager.ResetQuota(ctx, authID); errReset != nil {
+		log.Warnf("codex reset credits: clearing the cooldown of %s: %v", label, errReset)
+		return false
+	}
+	return true
+}
+
+// codexResetCreditTarget re-reads the setting and the credential just before a
+// reset is spent, and returns them while redemption is still on for that login.
+func (s *Service) codexResetCreditTarget(authID string) (*coreauth.Auth, *config.Config, bool) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	settings, enabled := codexResetCreditsSettings(cfg)
+	if !enabled || settings.dryRun {
+		return nil, nil, false
+	}
+	current, ok := s.coreManager.GetByID(authID)
+	if !ok || current == nil || !codexResetCreditsEligible(current, settings) {
+		return nil, nil, false
+	}
+	return current, cfg, true
+}
+
 // codexResetCreditRequest sends one reset-credit request with the login's own
-// token and headers, through its proxy settings.
-func (s *Service) codexResetCreditRequest(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, method, endpoint string, body []byte) ([]byte, error) {
+// token and headers, through its proxy settings, and returns the answer whatever
+// its status.
+func (s *Service) codexResetCreditRequest(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, method, endpoint string, body []byte) ([]byte, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -463,15 +570,24 @@ func (s *Service) codexResetCreditRequest(ctx context.Context, cfg *config.Confi
 	defer cancel()
 	req, errRequest := http.NewRequestWithContext(requestCtx, method, endpoint, bytes.NewReader(body))
 	if errRequest != nil {
-		return nil, fmt.Errorf("create request: %w", errRequest)
+		return nil, 0, fmt.Errorf("create request: %w", errRequest)
 	}
 	req.Header = oauthProbeHeaders(cfg, "codex", auth)
 	client := helps.NewProxyAwareHTTPClient(requestCtx, cfg, auth, 0)
 	resp, errDo := client.Do(req)
 	if errDo != nil {
-		return nil, fmt.Errorf("request failed: %w", errDo)
+		return nil, 0, fmt.Errorf("request failed: %w", errDo)
 	}
-	return readProbeBody(resp)
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Debugf("codex reset credits: close response body: %v", errClose)
+		}
+	}()
+	answer, errRead := io.ReadAll(io.LimitReader(resp.Body, oauthProbeMaxBody))
+	if errRead != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read response: %w", errRead)
+	}
+	return answer, resp.StatusCode, nil
 }
 
 func codexResetCreditLabel(auth *coreauth.Auth) string {
