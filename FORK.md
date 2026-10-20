@@ -17,6 +17,7 @@ Everything upstream documents still applies. This page covers only what the fork
 | `routing.quota-refresh-interval` | `"30m"` | How often idle Claude and Codex OAuth credentials have their quota windows read from the provider usage endpoint. `"0"` turns it off. |
 | `oauth.providers.codex.websockets` | `false` | Every Codex OAuth credential uses the upstream WebSocket transport for downstream WebSocket requests, unless its auth file sets `websockets` itself. |
 | `oauth.providers.codex.live-models` | `false` | Read the Codex model catalog from ChatGPT with each Codex OAuth credential and add what the bundled catalog lacks. |
+| `oauth.providers.codex.reset-credits` | off | Spend a Codex OAuth credential's banked usage-limit resets while it is blocked. |
 | `upstream.claude.live-models` | `false` | Read the model list from Anthropic with each Claude OAuth credential and add what the bundled catalog lacks. |
 | `oauth.providers.meta.live-models` | `false` | Read the Muse Code model catalog from Meta with each Meta login and add what the bundled catalog lacks. |
 | `client.native-model-lists` | `false` | Claude Code is only shown Claude models; Codex is only shown Codex models. |
@@ -49,6 +50,43 @@ so the quota refresher reads the usage endpoint for it (`/api/oauth/usage` for C
 
 With `routing.session-affinity: true` an established session stays on its credential; the order
 above decides new sessions and rebinding after a credential becomes unavailable.
+
+### Codex reset credits
+
+ChatGPT grants accounts banked usage-limit resets, the ones Codex offers under `/usage` as
+"Redeem reset". Redeeming one restarts every Codex rate-limit window of the account at once, so
+the next scheduled reset moves a full window out from the redemption. Each reset expires 30 days
+after it is granted. With `reset-credits` on, the proxy spends them for its own Codex logins:
+
+```yaml
+oauth:
+  providers:
+    codex:
+      reset-credits:
+        mode: "on"              # "off" (default), "dry-run" (log only) or "on"
+        min-wait: "6h"          # the shortest block a reset is spent on
+        expiring-within: "72h"  # a reset expiring this soon may go to a shorter block; "0" turns this off
+        auth-files: []          # only these auth files or credential IDs; empty means every Codex login
+```
+
+Every minute it looks at each Codex OAuth login. A login counts as blocked when the proxy holds
+it in a quota cooldown (after a `usage_limit_reached` refusal) or its latest rate-limit headers
+show a fully used window. A plan that spends ChatGPT credits past its limit keeps answering, so
+there the headers are the only sign. A login that is not blocked costs no request.
+
+For a blocked login it reads `/backend-api/wham/usage` and goes ahead only when ChatGPT also
+says the login is limited and a reset applies. It redeems a reset when the block lasts at least
+`min-wait`, or at least 30 minutes when the reset that expires first is due within
+`expiring-within`. It never redeems when a longer window than the blocked one has used less of
+its allowance than the share of it that has passed: restarting that window would cost more than
+the reset frees.
+
+The reset spent is the one that expires first, through
+`/backend-api/wham/rate-limit-reset-credits/consume`. Its request ID is derived from the login and
+the credit, so a retry after a lost answer is reported as already redeemed instead of spending a
+second reset. After a reset the proxy clears the login's quota cooldown, reads its windows again
+and leaves it alone for 30 minutes. Each redemption is logged at info level with
+`codex reset credits:`; `dry-run` logs the same decision without redeeming.
 
 ### Live models
 
@@ -301,7 +339,7 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `internal/config/config_v8.go` | Places the `meta` settings block at `oauth.providers.meta`. |
 | `sdk/cliproxy/service_config.go` | Builds the soonest-reset selector. |
 | `sdk/cliproxy/auth/conductor_selection.go` | Treats that selector as built in and keeps it off the ID-ordered scheduler fast path. |
-| `sdk/cliproxy/service_lifecycle.go` | Starts the quota refresher and the live model sync. |
+| `sdk/cliproxy/service_lifecycle.go` | Starts the quota refresher, the Codex reset-credit check and the live model sync. |
 | `sdk/cliproxy/service_models.go` | Adds live models when a Claude, Codex or Meta credential registers its models. |
 | `internal/watcher/synthesizer/file.go` | Applies the Codex WebSocket default to auth files. |
 | `internal/registry/codex_client_models.go` | Lays live Codex catalog entries over the installed catalog. |

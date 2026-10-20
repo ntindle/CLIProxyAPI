@@ -286,6 +286,9 @@ type CodexConfig struct {
 	// LiveModels discovers the models each Codex OAuth credential can use from the
 	// provider and adds the ones the model catalog does not list yet. Default is false.
 	LiveModels bool `yaml:"live-models,omitempty" json:"live-models,omitempty"`
+	// ResetCredits spends a Codex OAuth credential's banked usage-limit resets while
+	// it is blocked. Default is off.
+	ResetCredits CodexResetCreditsConfig `yaml:"reset-credits,omitempty" json:"reset-credits,omitzero"`
 }
 
 // DefaultSignInWithChatGPTIdentifier is the default identifier (agent_name_hint and User-Agent prefix)
