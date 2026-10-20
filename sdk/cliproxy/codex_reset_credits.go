@@ -44,6 +44,13 @@ const (
 	// reset within seconds, and the next check lifts a cooldown that a refusal sent
 	// before the reset brought back.
 	codexResetCreditsAfterRedeem = 10 * time.Minute
+	// codexResetCreditsAttemptWindow is how long after asking for a reset a free
+	// login's quota cooldowns are lifted at every level: they predate the reset.
+	codexResetCreditsAttemptWindow = 30 * time.Minute
+	// codexResetCreditsLiftGap is how long after lifting a cooldown a login refused
+	// again keeps its new one: ChatGPT's usage and its answers disagree, and lifting
+	// again would only bring more refusals.
+	codexResetCreditsLiftGap = 2 * time.Hour
 
 	codexResetCreditType = "codex_rate_limits"
 )
@@ -127,6 +134,17 @@ func (s codexResetCreditSettings) covers(auth *coreauth.Auth) bool {
 	return false
 }
 
+// codexResetCreditState is what the check remembers about one login between sweeps.
+type codexResetCreditState struct {
+	// nextCheck is the earliest time the login may be considered again.
+	nextCheck time.Time
+	// attemptedAt is the last time a reset was asked for, answered or not.
+	attemptedAt time.Time
+	// liftedAt is the last time a cooldown was lifted because ChatGPT reported the
+	// login free.
+	liftedAt time.Time
+}
+
 // startCodexResetCredits checks blocked Codex logins every minute while
 // oauth.providers.codex.reset-credits is on. The setting is read on every check,
 // so it can be turned on or off without a restart.
@@ -138,7 +156,7 @@ func (s *Service) startCodexResetCredits(ctx context.Context) {
 		ctx = context.Background()
 	}
 	go func() {
-		nextCheck := make(map[string]time.Time)
+		states := make(map[string]*codexResetCreditState)
 		timer := time.NewTimer(codexResetCreditsStartDelay)
 		defer timer.Stop()
 		for {
@@ -147,17 +165,16 @@ func (s *Service) startCodexResetCredits(ctx context.Context) {
 				return
 			case <-timer.C:
 			}
-			s.checkCodexResetCredits(ctx, nextCheck, time.Now())
+			s.checkCodexResetCredits(ctx, states, time.Now())
 			timer.Reset(codexResetCreditsTick)
 		}
 	}()
 }
 
 // checkCodexResetCredits considers every blocked Codex OAuth login whose next
-// check is due. A login that is not blocked costs no request. nextCheck carries
-// the earliest time each credential may be considered again.
-func (s *Service) checkCodexResetCredits(ctx context.Context, nextCheck map[string]time.Time, now time.Time) {
-	if s == nil || s.coreManager == nil || nextCheck == nil {
+// check is due. A login that is not blocked costs no request.
+func (s *Service) checkCodexResetCredits(ctx context.Context, states map[string]*codexResetCreditState, now time.Time) {
+	if s == nil || s.coreManager == nil || states == nil {
 		return
 	}
 	s.cfgMu.RLock()
@@ -181,20 +198,25 @@ func (s *Service) checkCodexResetCredits(ctx context.Context, nextCheck map[stri
 			continue
 		}
 		known[auth.ID] = struct{}{}
+		state := states[auth.ID]
+		if state == nil {
+			state = &codexResetCreditState{}
+			states[auth.ID] = state
+		}
 		at := clock()
-		if next, pending := nextCheck[auth.ID]; pending && at.Before(next) {
+		if at.Before(state.nextCheck) {
 			continue
 		}
 		blockedUntil, blocked := codexLocalBlock(auth, at)
 		if !blocked {
 			continue
 		}
-		backoff := s.considerCodexResetCredit(ctx, cfg, settings, auth, blockedUntil, clock)
-		nextCheck[auth.ID] = clock().Add(backoff)
+		backoff := s.considerCodexResetCredit(ctx, cfg, settings, state, auth, blockedUntil, clock)
+		state.nextCheck = clock().Add(backoff)
 	}
-	for id := range nextCheck {
+	for id := range states {
 		if _, ok := known[id]; !ok {
-			delete(nextCheck, id)
+			delete(states, id)
 		}
 	}
 }
@@ -260,6 +282,40 @@ func codexCredentialQuotaHeld(auth *coreauth.Auth, now time.Time) bool {
 	return auth.Quota.Exceeded && strings.EqualFold(auth.Quota.Reason, "credential_quota") && auth.Quota.NextRecoverAt.After(now)
 }
 
+// codexQuotaCooldownHeld reports whether the proxy holds the credential or any of
+// its models in a cooldown caused by quota. With model-level cooling a
+// usage_limit_reached refusal cools only the model it was for.
+func codexQuotaCooldownHeld(auth *coreauth.Auth, now time.Time) bool {
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	for _, state := range auth.ModelStates {
+		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexCooldownFingerprint summarizes the login's quota cooldowns, so a refusal
+// recorded while ChatGPT's usage was being read is not taken as one that usage answers.
+func codexCooldownFingerprint(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	var parts []string
+	if auth.Quota.Exceeded {
+		parts = append(parts, fmt.Sprintf("|%s|%d|%d", auth.Quota.Reason, auth.Quota.NextRecoverAt.UnixNano(), auth.Quota.BackoffLevel))
+	}
+	for model, state := range auth.ModelStates {
+		if state != nil && state.Quota.Exceeded {
+			parts = append(parts, fmt.Sprintf("%s|%s|%d|%d", model, state.Quota.Reason, state.Quota.NextRecoverAt.UnixNano(), state.UpdatedAt.UnixNano()))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n")
+}
+
 // codexInCooldown reports whether the proxy holds the credential, or any of its
 // models, in a cooldown.
 func codexInCooldown(auth *coreauth.Auth, now time.Time) bool {
@@ -289,14 +345,21 @@ type codexUsageState struct {
 	applicable      int64
 }
 
-func parseCodexUsageState(body []byte, now time.Time) codexUsageState {
+// parseCodexUsageState reads the usage answer. It reports false unless the answer
+// says outright whether the login is allowed and whether its limit is reached: an
+// empty or unfamiliar answer proves neither a block nor a recovery.
+func parseCodexUsageState(body []byte, now time.Time) (codexUsageState, bool) {
 	root := gjson.ParseBytes(body)
 	rateLimit := firstGJSON(root, "rate_limit", "rateLimit")
-	usage := codexUsageState{
-		limitReached: firstGJSON(rateLimit, "limit_reached", "limitReached").Bool(),
+	limitReached := firstGJSON(rateLimit, "limit_reached", "limitReached")
+	allowed := firstGJSON(rateLimit, "allowed")
+	isBool := func(value gjson.Result) bool { return value.Type == gjson.True || value.Type == gjson.False }
+	if !rateLimit.IsObject() || !isBool(limitReached) || !isBool(allowed) {
+		return codexUsageState{}, false
 	}
-	if allowed := firstGJSON(rateLimit, "allowed"); allowed.Exists() && allowed.Type != gjson.Null {
-		usage.notAllowed = !allowed.Bool()
+	usage := codexUsageState{
+		limitReached: limitReached.Bool(),
+		notAllowed:   !allowed.Bool(),
 	}
 	signals := make(map[string]string)
 	for name, values := range codexUsageQuotaHeaders(body) {
@@ -311,7 +374,7 @@ func parseCodexUsageState(body []byte, now time.Time) codexUsageState {
 	} else if count = firstGJSON(credits, "available_count", "availableCount"); count.Type == gjson.Number {
 		usage.applicableKnown, usage.applicable = true, count.Int()
 	}
-	return usage
+	return usage, true
 }
 
 // block returns when the login's exhausted windows reset and the length of the
@@ -419,19 +482,27 @@ func codexResetCreditExpiry(value gjson.Result) time.Time {
 // considerCodexResetCredit decides about one blocked login, redeems a reset when
 // it is worth it, and returns how long to leave the login alone. clock gives the
 // current time for each step.
-func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Config, settings codexResetCreditSettings, auth *coreauth.Auth, localUntil time.Time, clock func() time.Time) time.Duration {
+func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Config, settings codexResetCreditSettings, state *codexResetCreditState, auth *coreauth.Auth, localUntil time.Time, clock func() time.Time) time.Duration {
 	label := codexResetCreditLabel(auth)
+	fingerprint := codexCooldownFingerprint(auth)
+	if latest, ok := s.coreManager.GetByID(auth.ID); ok {
+		fingerprint = codexCooldownFingerprint(latest)
+	}
 	now := clock()
 	body, errUsage := s.oauthProbeGET(ctx, cfg, "codex", auth, codexUsageURL)
 	if errUsage != nil {
 		log.Debugf("codex reset credits: usage for %s: %v", label, errUsage)
 		return codexResetCreditsErrorBackoff
 	}
+	usage, known := parseCodexUsageState(body, now)
+	if !known {
+		log.Debugf("codex reset credits: usage for %s does not say whether it is limited", label)
+		return codexResetCreditsErrorBackoff
+	}
 	s.coreManager.ObserveQuotaSignals(auth.ID, "codex", codexUsageQuotaHeaders(body), now)
-	usage := parseCodexUsageState(body, now)
 	until, binding, blocked := usage.block(localUntil, now)
 	if !blocked {
-		s.reconcileCodexCooldown(ctx, settings, auth.ID, label, now)
+		s.reconcileCodexCooldown(ctx, state, auth.ID, label, fingerprint, clock())
 		return codexResetCreditsWaitBackoff
 	}
 	if usage.applicableKnown && usage.applicable <= 0 {
@@ -474,12 +545,12 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 		log.Infof("codex reset credits: dry run: would redeem a reset (%s) for %s, blocked for %s", expiry, label, wait.Round(time.Minute))
 		return codexResetCreditsWaitBackoff
 	}
-	// The setting or the credential may have changed while those requests ran.
-	current, currentCfg, allowed := s.codexResetCreditTarget(auth.ID)
-	if !allowed {
+	current, currentCfg, currentSettings, covered := s.codexResetCreditsCurrent(auth.ID)
+	if !covered || currentSettings.dryRun {
 		return codexResetCreditsWaitBackoff
 	}
 
+	state.attemptedAt = clock()
 	requestID := uuid.NewSHA1(codexResetCreditRequestSpace, []byte(current.ID+"\x00"+credit.id)).String()
 	payload, _ := json.Marshal(map[string]string{"redeem_request_id": requestID, "credit_id": credit.id})
 	answer, status, errConsume := s.codexResetCreditRequest(ctx, currentCfg, current, http.MethodPost, codexResetCreditsConsumeURL, payload)
@@ -512,14 +583,33 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 	}
 }
 
-// reconcileCodexCooldown lifts the quota cooldown the proxy holds on a login that
-// ChatGPT no longer limits: a reset was redeemed (by an earlier check whose answer
-// was lost, or by hand), ChatGPT reset limits itself, or a refusal sent before a
-// reset brought the cooldown back. The check schedule spaces repeats out, so a
-// login reported free that keeps being refused does not flap.
-func (s *Service) reconcileCodexCooldown(ctx context.Context, settings codexResetCreditSettings, authID, label string, now time.Time) {
-	latest, ok := s.coreManager.GetByID(authID)
-	if !ok || latest == nil || latest.Disabled || !codexCredentialQuotaHeld(latest, now) {
+// reconcileCodexCooldown lifts quota cooldowns the proxy holds on a login that
+// ChatGPT reports free.
+//
+// A credential-wide quota cooldown is lifted whenever that happens: a reset was
+// redeemed by hand, or ChatGPT reset limits itself. Model-level quota cooldowns are
+// lifted only shortly after this check asked for a reset, when they predate it (an
+// answer that was lost, or a refusal sent before the reset); at other times one may
+// be a single model's own limit, which the usage answer does not cover.
+//
+// fingerprint is the login's cooldowns from before the usage request; a refusal
+// recorded since then is newer than the usage and stays. A login refused again soon
+// after a lift keeps its cooldown: ChatGPT's usage and its answers disagree.
+func (s *Service) reconcileCodexCooldown(ctx context.Context, state *codexResetCreditState, authID, label, fingerprint string, now time.Time) {
+	current, _, settings, covered := s.codexResetCreditsCurrent(authID)
+	if !covered {
+		return
+	}
+	recent := !state.attemptedAt.IsZero() && now.Sub(state.attemptedAt) < codexResetCreditsAttemptWindow
+	if !codexCredentialQuotaHeld(current, now) && !(recent && codexQuotaCooldownHeld(current, now)) {
+		return
+	}
+	if codexCooldownFingerprint(current) != fingerprint {
+		return
+	}
+	if !recent && !state.liftedAt.IsZero() && now.Sub(state.liftedAt) < codexResetCreditsLiftGap {
+		log.Debugf("codex reset credits: %s was refused again after its cooldown was lifted at %s; leaving the new one",
+			label, state.liftedAt.Format(time.RFC3339))
 		return
 	}
 	if settings.dryRun {
@@ -527,6 +617,7 @@ func (s *Service) reconcileCodexCooldown(ctx context.Context, settings codexRese
 		return
 	}
 	if s.clearCodexCooldown(ctx, authID, label) {
+		state.liftedAt = now
 		log.Infof("codex reset credits: cleared the cooldown of %s, which ChatGPT no longer limits", label)
 	}
 }
@@ -542,21 +633,23 @@ func (s *Service) clearCodexCooldown(ctx context.Context, authID, label string) 
 	return true
 }
 
-// codexResetCreditTarget re-reads the setting and the credential just before a
-// reset is spent, and returns them while redemption is still on for that login.
-func (s *Service) codexResetCreditTarget(authID string) (*coreauth.Auth, *config.Config, bool) {
+// codexResetCreditsCurrent re-reads the setting and the credential just before a
+// reset is spent or a cooldown lifted, and returns them while the setting still
+// covers that login. The setting or the credential may have changed while the
+// requests before it ran.
+func (s *Service) codexResetCreditsCurrent(authID string) (*coreauth.Auth, *config.Config, codexResetCreditSettings, bool) {
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	settings, enabled := codexResetCreditsSettings(cfg)
-	if !enabled || settings.dryRun {
-		return nil, nil, false
+	if !enabled {
+		return nil, nil, codexResetCreditSettings{}, false
 	}
 	current, ok := s.coreManager.GetByID(authID)
 	if !ok || current == nil || !codexResetCreditsEligible(current, settings) {
-		return nil, nil, false
+		return nil, nil, codexResetCreditSettings{}, false
 	}
-	return current, cfg, true
+	return current, cfg, settings, true
 }
 
 // codexResetCreditRequest sends one reset-credit request with the login's own

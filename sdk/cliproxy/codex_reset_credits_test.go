@@ -29,6 +29,7 @@ type resetBackend struct {
 	consumeStatus int               // HTTP status of consume answers; 0 means 200
 	consumeFail   int               // consume requests to fail with 500 first, spending nothing
 	loseAnswers   int               // consume requests to carry out, then answer 500
+	onUsage       func()            // runs while a usage answer is being prepared
 	onList        func()            // runs while a credit list is being answered
 	redeemed      map[string]bool
 	usageCalls    map[string]int
@@ -73,6 +74,9 @@ func (b *resetBackend) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/wham/usage":
 		b.usageCalls[token]++
+		if b.onUsage != nil {
+			b.onUsage()
+		}
 		if body, ok := b.usageAfter[token]; ok && b.redeemed[token] {
 			_, _ = w.Write([]byte(body))
 			return
@@ -360,10 +364,14 @@ func TestForkSoonestCodexResetCredit(t *testing.T) {
 
 // assertNextCheck checks a scheduled check against the sweep time plus a backoff,
 // allowing for the time the sweep itself took.
-func assertNextCheck(t *testing.T, nextCheck map[string]time.Time, id string, want time.Time) {
+func assertNextCheck(t *testing.T, states map[string]*codexResetCreditState, id string, want time.Time) {
 	t.Helper()
-	got, ok := nextCheck[id]
-	if !ok || got.Before(want) || got.Sub(want) > 5*time.Second {
+	state, ok := states[id]
+	if !ok || state.nextCheck.Before(want) || state.nextCheck.Sub(want) > 5*time.Second {
+		var got time.Time
+		if ok {
+			got = state.nextCheck
+		}
 		t.Fatalf("next check for %s = %s (scheduled %t), want %s", id, got, ok, want)
 	}
 }
@@ -384,9 +392,9 @@ func TestForkCodexResetCreditsRedeemsLongBlock(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	registerCodexLogin(t, manager, "codex-pro", time.Time{}, now.Add(-time.Minute), weeklyExhaustedSignals(weeklyReset))
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
-	nextCheck := make(map[string]time.Time)
+	states := make(map[string]*codexResetCreditState)
 
-	service.checkCodexResetCredits(context.Background(), nextCheck, now)
+	service.checkCodexResetCredits(context.Background(), states, now)
 
 	consumed := backend.consumes()
 	if len(consumed) != 1 {
@@ -401,11 +409,11 @@ func TestForkCodexResetCreditsRedeemsLongBlock(t *testing.T) {
 	if len(windows) != 1 || windows[0].Used != 0 {
 		t.Fatalf("windows after the reset = %+v, want the re-read usage", windows)
 	}
-	assertNextCheck(t, nextCheck, "codex-pro", now.Add(codexResetCreditsAfterRedeem))
+	assertNextCheck(t, states, "codex-pro", now.Add(codexResetCreditsAfterRedeem))
 
 	// Within the pause after a reset nothing is asked, even if the headers still say blocked.
 	manager.ObserveQuotaSignals("codex-pro", "codex", headerOf(weeklyExhaustedSignals(weeklyReset)), now.Add(time.Minute))
-	service.checkCodexResetCredits(context.Background(), nextCheck, now.Add(2*time.Minute))
+	service.checkCodexResetCredits(context.Background(), states, now.Add(2*time.Minute))
 	if got := len(backend.consumes()); got != 1 {
 		t.Fatalf("consume requests after a second check = %d, want 1", got)
 	}
@@ -437,7 +445,7 @@ func TestForkCodexResetCreditsClearsCooldownWithExpiringCredit(t *testing.T) {
 	}
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
 
-	service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 	consumed := backend.consumes()
 	if len(consumed) != 1 || consumed[0].creditID != "credit-expiring" {
@@ -464,7 +472,7 @@ func TestForkCodexResetCreditsKeepsCreditsForLongBlocks(t *testing.T) {
 	registerCodexLogin(t, manager, "codex-session", now.Add(2*time.Hour), time.Time{}, nil)
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
 
-	service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 	if consumed := backend.consumes(); len(consumed) != 0 {
 		t.Fatalf("consume = %+v, want none: neither block reaches min-wait and no credit is expiring", consumed)
@@ -490,7 +498,7 @@ func TestForkCodexResetCreditsKeepsWeeklyPace(t *testing.T) {
 	registerCodexLogin(t, manager, "codex-team", now.Add(2*time.Hour), time.Time{}, nil)
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
 
-	service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 	if consumed := backend.consumes(); len(consumed) != 0 {
 		t.Fatalf("consume = %+v, want none while the weekly window is behind pace", consumed)
@@ -510,7 +518,7 @@ func TestForkCodexResetCreditsDryRun(t *testing.T) {
 	registerCodexLogin(t, manager, "codex-pro", time.Time{}, now, weeklyExhaustedSignals(weeklyReset))
 	service := &Service{cfg: resetCreditsConfig("dry-run"), coreManager: manager}
 
-	service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 	if consumed := backend.consumes(); len(consumed) != 0 {
 		t.Fatalf("dry run redeemed: %+v", consumed)
@@ -537,7 +545,7 @@ func TestForkCodexResetCreditsLeavesOtherLoginsAlone(t *testing.T) {
 	registerCodexLogin(t, manager, "codex-unlisted", time.Time{}, now, weeklyExhaustedSignals(weeklyReset))
 
 	off := &Service{cfg: resetCreditsConfig(""), coreManager: manager}
-	off.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	off.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 	for _, id := range []string{"codex-free", "codex-listed", "codex-unlisted"} {
 		if usage, list := backend.calls("token-" + id); usage != 0 || list != 0 {
 			t.Fatalf("with the feature off, %s got %d usage and %d list request(s)", id, usage, list)
@@ -547,7 +555,7 @@ func TestForkCodexResetCreditsLeavesOtherLoginsAlone(t *testing.T) {
 	cfg := resetCreditsConfig("on")
 	cfg.Codex.ResetCredits.AuthFiles = []string{"codex-free.json", "codex-listed.json"}
 	service := &Service{cfg: cfg, coreManager: manager}
-	service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 	if usage, _ := backend.calls("token-codex-free"); usage != 0 {
 		t.Fatalf("a login that is not blocked got %d usage request(s)", usage)
@@ -573,19 +581,19 @@ func TestForkCodexResetCreditsRetriesWithSameRequestID(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	registerCodexLogin(t, manager, "codex-pro", time.Time{}, now, weeklyExhaustedSignals(weeklyReset))
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
-	nextCheck := make(map[string]time.Time)
+	states := make(map[string]*codexResetCreditState)
 
-	service.checkCodexResetCredits(context.Background(), nextCheck, now)
-	assertNextCheck(t, nextCheck, "codex-pro", now.Add(codexResetCreditsErrorBackoff))
+	service.checkCodexResetCredits(context.Background(), states, now)
+	assertNextCheck(t, states, "codex-pro", now.Add(codexResetCreditsErrorBackoff))
 	retried := now.Add(codexResetCreditsErrorBackoff + 10*time.Second)
-	service.checkCodexResetCredits(context.Background(), nextCheck, retried)
+	service.checkCodexResetCredits(context.Background(), states, retried)
 
 	consumed := backend.consumes()
 	if len(consumed) != 2 || consumed[0].requestID == "" || consumed[0].requestID != consumed[1].requestID {
 		t.Fatalf("consume requests = %+v, want two with one request id", consumed)
 	}
 	// already_redeemed counts as a redemption.
-	assertNextCheck(t, nextCheck, "codex-pro", retried.Add(codexResetCreditsAfterRedeem))
+	assertNextCheck(t, states, "codex-pro", retried.Add(codexResetCreditsAfterRedeem))
 }
 
 // A redemption ChatGPT carried out but whose answer was lost leaves the proxy's
@@ -602,14 +610,14 @@ func TestForkCodexResetCreditsLiftsCooldownAfterLostAnswer(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	registerCodexLogin(t, manager, "codex-team", weeklyReset, time.Time{}, nil)
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
-	nextCheck := make(map[string]time.Time)
+	states := make(map[string]*codexResetCreditState)
 
-	service.checkCodexResetCredits(context.Background(), nextCheck, now)
+	service.checkCodexResetCredits(context.Background(), states, now)
 	held, _ := manager.GetByID("codex-team")
 	if !codexInCooldown(held, now) {
 		t.Fatal("precondition: after a lost answer the cooldown is still held")
 	}
-	service.checkCodexResetCredits(context.Background(), nextCheck, now.Add(codexResetCreditsErrorBackoff+10*time.Second))
+	service.checkCodexResetCredits(context.Background(), states, now.Add(codexResetCreditsErrorBackoff+10*time.Second))
 
 	if consumed := backend.consumes(); len(consumed) != 1 {
 		t.Fatalf("consume requests = %d, want 1: the login was already free", len(consumed))
@@ -623,7 +631,7 @@ func TestForkCodexResetCreditsLiftsCooldownAfterLostAnswer(t *testing.T) {
 	dryManager := coreauth.NewManager(nil, nil, nil)
 	registerCodexLogin(t, dryManager, "codex-team", weeklyReset, time.Time{}, nil)
 	dry := &Service{cfg: resetCreditsConfig("dry-run"), coreManager: dryManager}
-	dry.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	dry.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 	if kept, _ := dryManager.GetByID("codex-team"); !codexInCooldown(kept, now) {
 		t.Fatal("dry run lifted a cooldown")
 	}
@@ -669,7 +677,7 @@ func TestForkCodexResetCreditsRechecksBeforeSpending(t *testing.T) {
 			service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
 			backend.onList = func() { change(t, service, manager) }
 
-			service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+			service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 			if _, list := backend.calls("token-codex-pro"); list != 1 {
 				t.Fatalf("credit list requests = %d, want 1", list)
@@ -694,11 +702,11 @@ func TestForkCodexResetCreditsReadsCodeOfRefusals(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	registerCodexLogin(t, manager, "codex-pro", time.Time{}, now, weeklyExhaustedSignals(weeklyReset))
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
-	nextCheck := make(map[string]time.Time)
+	states := make(map[string]*codexResetCreditState)
 
-	service.checkCodexResetCredits(context.Background(), nextCheck, now)
+	service.checkCodexResetCredits(context.Background(), states, now)
 
-	assertNextCheck(t, nextCheck, "codex-pro", now.Add(codexResetCreditsAfterRedeem))
+	assertNextCheck(t, states, "codex-pro", now.Add(codexResetCreditsAfterRedeem))
 }
 
 func TestForkCodexResetCreditsNeedsAccountID(t *testing.T) {
@@ -721,7 +729,7 @@ func TestForkCodexResetCreditsNeedsAccountID(t *testing.T) {
 	manager.ObserveQuotaSignals("codex-pro", "codex", headerOf(weeklyExhaustedSignals(weeklyReset)), now)
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
 
-	service.checkCodexResetCredits(context.Background(), make(map[string]time.Time), now)
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
 
 	if usage, list := backend.calls("token-codex-pro"); usage != 0 || list != 0 {
 		t.Fatalf("a login without an account ID got %d usage and %d list request(s)", usage, list)
@@ -739,16 +747,16 @@ func TestForkCodexResetCreditsNothingToReset(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	registerCodexLogin(t, manager, "codex-pro", weeklyReset, time.Time{}, nil)
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
-	nextCheck := make(map[string]time.Time)
+	states := make(map[string]*codexResetCreditState)
 
-	service.checkCodexResetCredits(context.Background(), nextCheck, now)
+	service.checkCodexResetCredits(context.Background(), states, now)
 
 	auth, _ := manager.GetByID("codex-pro")
 	if !codexInCooldown(auth, now) {
 		t.Fatal("nothing_to_reset must leave the cooldown in place")
 	}
 	// nothing_to_reset is not a redemption.
-	assertNextCheck(t, nextCheck, "codex-pro", now.Add(codexResetCreditsWaitBackoff))
+	assertNextCheck(t, states, "codex-pro", now.Add(codexResetCreditsWaitBackoff))
 }
 
 // The usage endpoint has the last word: a login the proxy still holds in a cooldown
@@ -766,9 +774,9 @@ func TestForkCodexResetCreditsFollowsUsageEndpoint(t *testing.T) {
 	registerCodexLogin(t, manager, "codex-free", now.Add(4*24*time.Hour), time.Time{}, nil)
 	registerCodexLogin(t, manager, "codex-none", now.Add(4*24*time.Hour), time.Time{}, nil)
 	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
-	nextCheck := make(map[string]time.Time)
+	states := make(map[string]*codexResetCreditState)
 
-	service.checkCodexResetCredits(context.Background(), nextCheck, now)
+	service.checkCodexResetCredits(context.Background(), states, now)
 
 	for _, id := range []string{"codex-free", "codex-none"} {
 		if usage, list := backend.calls("token-" + id); usage != 1 || list != 0 {
@@ -778,13 +786,225 @@ func TestForkCodexResetCreditsFollowsUsageEndpoint(t *testing.T) {
 	if consumed := backend.consumes(); len(consumed) != 0 {
 		t.Fatalf("consume = %+v, want none", consumed)
 	}
-	assertNextCheck(t, nextCheck, "codex-free", now.Add(codexResetCreditsWaitBackoff))
-	assertNextCheck(t, nextCheck, "codex-none", now.Add(codexResetCreditsNoCreditBackoff))
+	assertNextCheck(t, states, "codex-free", now.Add(codexResetCreditsWaitBackoff))
+	assertNextCheck(t, states, "codex-none", now.Add(codexResetCreditsNoCreditBackoff))
 	if free, _ := manager.GetByID("codex-free"); codexInCooldown(free, time.Now()) {
 		t.Fatal("the cooldown of a login ChatGPT no longer limits must be lifted")
 	}
 	if none, _ := manager.GetByID("codex-none"); !codexInCooldown(none, time.Now()) {
 		t.Fatal("the cooldown of a login ChatGPT still limits must stay")
+	}
+}
+
+// registerCodexModelCooldown registers a login that model-level cooling has blocked:
+// only the model the refusal was for is in a quota cooldown.
+func registerCodexModelCooldown(t *testing.T, manager *coreauth.Manager, id string, until time.Time) {
+	t.Helper()
+	auth := &coreauth.Auth{
+		ID:         id,
+		FileName:   id + ".json",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth},
+		Metadata:   map[string]any{"access_token": "token-" + id, "account_id": "acct-" + id},
+		ModelStates: map[string]*coreauth.ModelState{"gpt-6-astra": {
+			Status:         coreauth.StatusError,
+			Unavailable:    true,
+			NextRetryAfter: until,
+			Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until},
+		}},
+	}
+	if _, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register(%s): %v", id, errRegister)
+	}
+	registered, _ := manager.GetByID(id)
+	if !codexQuotaCooldownHeld(registered, time.Now()) || codexCredentialQuotaHeld(registered, time.Now()) {
+		t.Fatal("precondition: only a model-level quota cooldown")
+	}
+}
+
+// With model-level cooling a lost answer leaves only a model cooled; right after the
+// attempt that cooldown predates the reset and is lifted. Without a recent attempt a
+// model-level cooldown may be that model's own limit, which usage does not show.
+func TestForkCodexResetCreditsModelCooldowns(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+	backend := newResetBackend(t)
+	backend.loseAnswers = 1
+	now := time.Now().Truncate(time.Second)
+	weeklyReset := now.Add(4 * 24 * time.Hour)
+	for _, id := range []string{"codex-lost", "codex-model-limit"} {
+		backend.usage["token-"+id] = usageBody(true, 1, usageWindow{100, 7 * 24 * time.Hour, weeklyReset})
+		backend.usageAfter["token-"+id] = usageBody(false, 0, usageWindow{0, 7 * 24 * time.Hour, now.Add(7 * 24 * time.Hour)})
+		backend.credits["token-"+id] = creditsBody(resetCreditFixture{id: "credit-" + id, expires: now.Add(9 * 24 * time.Hour)})
+	}
+	backend.usage["token-codex-model-limit"] = usageBody(false, 1, usageWindow{40, 7 * 24 * time.Hour, weeklyReset})
+	manager := coreauth.NewManager(nil, nil, nil)
+	registerCodexModelCooldown(t, manager, "codex-lost", weeklyReset)
+	registerCodexModelCooldown(t, manager, "codex-model-limit", weeklyReset)
+	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+	states := make(map[string]*codexResetCreditState)
+
+	service.checkCodexResetCredits(context.Background(), states, now)
+	service.checkCodexResetCredits(context.Background(), states, now.Add(codexResetCreditsWaitBackoff+10*time.Second))
+
+	if consumed := backend.consumes(); len(consumed) != 1 || consumed[0].creditID != "credit-codex-lost" {
+		t.Fatalf("consume = %+v, want one, for the login whose answer was lost", consumed)
+	}
+	if lost, _ := manager.GetByID("codex-lost"); codexQuotaCooldownHeld(lost, time.Now()) {
+		t.Fatal("the model cooldown left by a lost answer must be lifted")
+	}
+	if limited, _ := manager.GetByID("codex-model-limit"); !codexQuotaCooldownHeld(limited, time.Now()) {
+		t.Fatal("a model cooldown without a recent reset attempt must stay")
+	}
+}
+
+// An answer that does not say whether the login is limited proves nothing: the
+// cooldown stays and nothing is redeemed.
+func TestForkCodexResetCreditsIgnoresUnknownUsage(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+	for name, body := range map[string]string{
+		"empty":           `{}`,
+		"null rate limit": `{"rate_limit": null, "rate_limit_reset_credits": {"available_count": 1}}`,
+		"missing flags":   `{"rate_limit": {"primary_window": {"used_percent": 10, "limit_window_seconds": 604800, "reset_at": 1}}}`,
+		"not json":        `<html>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := newResetBackend(t)
+			now := time.Now().Truncate(time.Second)
+			backend.usage["token-codex-team"] = body
+			backend.credits["token-codex-team"] = creditsBody(resetCreditFixture{id: "credit-oct", expires: now.Add(24 * time.Hour)})
+			manager := coreauth.NewManager(nil, nil, nil)
+			registerCodexLogin(t, manager, "codex-team", now.Add(4*24*time.Hour), time.Time{}, nil)
+			service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+			states := make(map[string]*codexResetCreditState)
+
+			service.checkCodexResetCredits(context.Background(), states, now)
+
+			if team, _ := manager.GetByID("codex-team"); !codexCredentialQuotaHeld(team, time.Now()) {
+				t.Fatal("an unknown usage answer lifted the cooldown")
+			}
+			if _, list := backend.calls("token-codex-team"); list != 0 || len(backend.consumes()) != 0 {
+				t.Fatalf("an unknown usage answer led to %d list and %d consume request(s)", list, len(backend.consumes()))
+			}
+			assertNextCheck(t, states, "codex-team", now.Add(codexResetCreditsErrorBackoff))
+		})
+	}
+}
+
+// A refusal recorded while the usage was being read is newer than that usage, and a
+// setting changed meanwhile applies: in both cases the cooldown stays.
+func TestForkCodexResetCreditsRechecksBeforeLifting(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+	now := time.Now().Truncate(time.Second)
+	for name, change := range map[string]func(*testing.T, *Service, *coreauth.Manager){
+		"refusal during the read": func(t *testing.T, _ *Service, manager *coreauth.Manager) {
+			retry := 3 * time.Hour
+			manager.MarkResult(context.Background(), coreauth.Result{
+				AuthID: "codex-team", Provider: "codex", Model: "gpt-6-astra",
+				Error:      &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Code: "usage_limit_reached", Message: "quota exceeded"},
+				RetryAfter: &retry, CredentialScope: true,
+			})
+		},
+		"mode off": func(_ *testing.T, service *Service, _ *coreauth.Manager) {
+			service.cfgMu.Lock()
+			service.cfg = resetCreditsConfig("off")
+			service.cfgMu.Unlock()
+		},
+		"dry run": func(_ *testing.T, service *Service, _ *coreauth.Manager) {
+			service.cfgMu.Lock()
+			service.cfg = resetCreditsConfig("dry-run")
+			service.cfgMu.Unlock()
+		},
+		"login left auth-files": func(_ *testing.T, service *Service, _ *coreauth.Manager) {
+			cfg := resetCreditsConfig("on")
+			cfg.Codex.ResetCredits.AuthFiles = []string{"codex-other.json"}
+			service.cfgMu.Lock()
+			service.cfg = cfg
+			service.cfgMu.Unlock()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := newResetBackend(t)
+			backend.usage["token-codex-team"] = usageBody(false, 0, usageWindow{40, 7 * 24 * time.Hour, now.Add(4 * 24 * time.Hour)})
+			manager := coreauth.NewManager(nil, nil, nil)
+			registerCodexLogin(t, manager, "codex-team", now.Add(4*24*time.Hour), time.Time{}, nil)
+			service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+			backend.onUsage = func() { change(t, service, manager) }
+
+			service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
+
+			if team, _ := manager.GetByID("codex-team"); !codexQuotaCooldownHeld(team, time.Now()) {
+				t.Fatal("the cooldown was lifted despite the change during the usage read")
+			}
+		})
+	}
+}
+
+// A login ChatGPT reports free but that is refused again soon after its cooldown was
+// lifted keeps the new cooldown, until the lift gap has passed.
+func TestForkCodexResetCreditsDoesNotFlap(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+	backend := newResetBackend(t)
+	now := time.Now().Truncate(time.Second)
+	backend.usage["token-codex-team"] = usageBody(false, 0, usageWindow{40, 7 * 24 * time.Hour, now.Add(4 * 24 * time.Hour)})
+	manager := coreauth.NewManager(nil, nil, nil)
+	registerCodexLogin(t, manager, "codex-team", now.Add(4*24*time.Hour), time.Time{}, nil)
+	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+	states := make(map[string]*codexResetCreditState)
+	refuse := func() {
+		retry := 3 * time.Hour
+		manager.MarkResult(context.Background(), coreauth.Result{
+			AuthID: "codex-team", Provider: "codex", Model: "gpt-6-astra",
+			Error:      &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Code: "usage_limit_reached", Message: "quota exceeded"},
+			RetryAfter: &retry, CredentialScope: true,
+		})
+		if team, _ := manager.GetByID("codex-team"); !codexCredentialQuotaHeld(team, time.Now()) {
+			t.Fatal("precondition: a usage_limit_reached refusal holds the credential")
+		}
+	}
+
+	service.checkCodexResetCredits(context.Background(), states, now)
+	if team, _ := manager.GetByID("codex-team"); codexQuotaCooldownHeld(team, time.Now()) {
+		t.Fatal("the first lift did not happen")
+	}
+
+	refuse()
+	again := now.Add(codexResetCreditsWaitBackoff + 10*time.Second)
+	service.checkCodexResetCredits(context.Background(), states, again)
+	if team, _ := manager.GetByID("codex-team"); !codexQuotaCooldownHeld(team, time.Now()) {
+		t.Fatal("a login refused again right after a lift must keep its cooldown")
+	}
+
+	later := now.Add(codexResetCreditsLiftGap + time.Minute)
+	service.checkCodexResetCredits(context.Background(), states, later)
+	if team, _ := manager.GetByID("codex-team"); codexQuotaCooldownHeld(team, time.Now()) {
+		t.Fatal("after the lift gap the cooldown of a free login must be lifted again")
+	}
+}
+
+// The consume request goes out with the credential as it is when the reset is spent,
+// so a token refreshed during the check is the one used.
+func TestForkCodexResetCreditsUsesFreshCredential(t *testing.T) {
+	backend := newResetBackend(t)
+	now := time.Now().Truncate(time.Second)
+	weeklyReset := now.Add(4 * 24 * time.Hour)
+	backend.usage["token-codex-pro"] = usageBody(true, 1, usageWindow{100, 7 * 24 * time.Hour, weeklyReset})
+	backend.credits["token-codex-pro"] = creditsBody(resetCreditFixture{id: "credit-oct", expires: now.Add(9 * 24 * time.Hour)})
+	manager := coreauth.NewManager(nil, nil, nil)
+	registerCodexLogin(t, manager, "codex-pro", time.Time{}, now, weeklyExhaustedSignals(weeklyReset))
+	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+	backend.onList = func() {
+		auth, _ := manager.GetByID("codex-pro")
+		auth.Metadata["access_token"] = "token-refreshed"
+		if _, errUpdate := manager.Update(coreauth.WithSkipPersist(context.Background()), auth); errUpdate != nil {
+			t.Errorf("refresh the token: %v", errUpdate)
+		}
+	}
+
+	service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
+
+	if consumed := backend.consumes(); len(consumed) != 1 || consumed[0].token != "token-refreshed" {
+		t.Fatalf("consume = %+v, want one with the refreshed token", consumed)
 	}
 }
 

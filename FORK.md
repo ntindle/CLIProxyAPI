@@ -89,11 +89,22 @@ way. The request ID is derived from the login and the credit, so a retry after a
 reported as already redeemed instead of spending a second reset. After a reset the proxy clears
 the login's cooldown, reads its windows again and leaves it alone for 10 minutes.
 
-When the usage endpoint says a login is no longer limited while the proxy still holds it in a quota
-cooldown, the cooldown is lifted. That covers a reset whose answer was lost, one redeemed by hand,
-limits ChatGPT resets itself, and a refusal sent before a reset that lands after it. Lifting a
-cooldown works like the panel's reset-quota action: it clears every cooldown of the login, so a
-model that failed for another reason is tried once more before its own cooldown returns.
+When the usage endpoint says outright that a login is not limited while the proxy still holds a
+quota cooldown on it, the cooldown is lifted:
+
+- a cooldown on the whole login, at any time: a reset redeemed by hand, or limits ChatGPT reset
+  itself;
+- a cooldown on single models (model-level cooling), only within 30 minutes of a reset this
+  check asked for, when it predates the reset (an answer that was lost, or a refusal sent before
+  the reset). At other times it may be that model's own limit, which the usage answer does not
+  show.
+
+The cooldown stays when the usage answer does not say whether the login is limited, when a
+refusal was recorded while the usage was being read, when the setting changed meanwhile, and when
+the login was refused again within 2 hours of an earlier lift: then ChatGPT's usage and its
+answers disagree, and lifting again would only bring more refusals. Lifting a cooldown works like
+the panel's reset-quota action: it clears every cooldown of the login, so a model that failed for
+another reason is tried once more before its own cooldown returns.
 
 Each redemption and each lifted cooldown is logged at info level with `codex reset credits:`;
 `dry-run` logs the same decisions and changes nothing.
