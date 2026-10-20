@@ -755,8 +755,11 @@ func TestForkCodexResetCreditsNothingToReset(t *testing.T) {
 	if !codexInCooldown(auth, now) {
 		t.Fatal("nothing_to_reset must leave the cooldown in place")
 	}
-	// nothing_to_reset is not a redemption.
+	// nothing_to_reset is not a redemption, and no cooldown predates a reset.
 	assertNextCheck(t, states, "codex-pro", now.Add(codexResetCreditsWaitBackoff))
+	if !states["codex-pro"].attemptedAt.IsZero() {
+		t.Fatal("nothing_to_reset must not leave a reset attempt behind")
+	}
 }
 
 // The usage endpoint has the last word: a login the proxy still holds in a cooldown
@@ -794,6 +797,20 @@ func TestForkCodexResetCreditsFollowsUsageEndpoint(t *testing.T) {
 	if none, _ := manager.GetByID("codex-none"); !codexInCooldown(none, time.Now()) {
 		t.Fatal("the cooldown of a login ChatGPT still limits must stay")
 	}
+}
+
+// codexQuotaCooldownHeld reports whether the proxy holds the credential or any of
+// its models in a cooldown caused by quota.
+func codexQuotaCooldownHeld(auth *coreauth.Auth, now time.Time) bool {
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	for _, state := range auth.ModelStates {
+		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // registerCodexModelCooldown registers a login that model-level cooling has blocked:
@@ -855,6 +872,97 @@ func TestForkCodexResetCreditsModelCooldowns(t *testing.T) {
 	}
 	if limited, _ := manager.GetByID("codex-model-limit"); !codexQuotaCooldownHeld(limited, time.Now()) {
 		t.Fatal("a model cooldown without a recent reset attempt must stay")
+	}
+}
+
+// After a reset, a model cooldown recorded while refusals already on their way were
+// still arriving predates the reset and is lifted; one recorded later may be that
+// model's own limit and stays.
+func TestForkCodexResetCreditsKeepsModelLimitsAfterReset(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+	backend := newResetBackend(t)
+	now := time.Now().Truncate(time.Second)
+	weeklyReset := now.Add(4 * 24 * time.Hour)
+	ids := map[string]time.Duration{"codex-early": 30 * time.Second, "codex-late": 5 * time.Minute}
+	manager := coreauth.NewManager(nil, nil, nil)
+	for id := range ids {
+		backend.usage["token-"+id] = usageBody(true, 1, usageWindow{100, 7 * 24 * time.Hour, weeklyReset})
+		backend.usageAfter["token-"+id] = usageBody(false, 0, usageWindow{0, 7 * 24 * time.Hour, now.Add(7 * 24 * time.Hour)})
+		backend.credits["token-"+id] = creditsBody(resetCreditFixture{id: "credit-" + id, expires: now.Add(9 * 24 * time.Hour)})
+		registerCodexModelCooldown(t, manager, id, weeklyReset)
+	}
+	service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+	states := make(map[string]*codexResetCreditState)
+
+	service.checkCodexResetCredits(context.Background(), states, now)
+	if consumed := backend.consumes(); len(consumed) != 2 {
+		t.Fatalf("consume requests = %d, want one per login", len(consumed))
+	}
+	// A refusal is recorded for each login after the reset, early or late.
+	for id, after := range ids {
+		auth := &coreauth.Auth{
+			ID:         id,
+			FileName:   id + ".json",
+			Provider:   "codex",
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth},
+			Metadata:   map[string]any{"access_token": "token-" + id, "account_id": "acct-" + id},
+			ModelStates: map[string]*coreauth.ModelState{"gpt-6-astra": {
+				Status:         coreauth.StatusError,
+				Unavailable:    true,
+				NextRetryAfter: weeklyReset,
+				Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: weeklyReset},
+				UpdatedAt:      now.Add(after),
+			}},
+		}
+		if _, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+	service.checkCodexResetCredits(context.Background(), states, now.Add(codexResetCreditsAfterRedeem+10*time.Second))
+
+	if early, _ := manager.GetByID("codex-early"); codexQuotaCooldownHeld(early, time.Now()) {
+		t.Fatal("a model cooldown recorded right after the reset predates it and must be lifted")
+	}
+	if late, _ := manager.GetByID("codex-late"); !codexQuotaCooldownHeld(late, time.Now()) {
+		t.Fatal("a model cooldown recorded well after the reset must stay")
+	}
+}
+
+// A limit of a single model or feature that ChatGPT reports reached keeps the login's
+// cooldown, though its main windows are free.
+func TestForkCodexResetCreditsRespectsAdditionalLimits(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+	now := time.Now().Truncate(time.Second)
+	free := func(additional string) string {
+		return fmt.Sprintf(`{"plan_type": "team", "rate_limit": {"allowed": true, "limit_reached": false,
+			"primary_window": {"used_percent": 20, "limit_window_seconds": 18000, "reset_at": %d}},
+			"additional_rate_limits": %s, "rate_limit_reset_credits": {"available_count": 1, "applicable_available_count": 0}}`,
+			now.Add(3*time.Hour).Unix(), additional)
+	}
+	for name, testCase := range map[string]struct {
+		additional string
+		lifted     bool
+	}{
+		"none":            {`null`, true},
+		"under its limit": {`[{"limit_name": "bengalfox", "metered_feature": "codex", "rate_limit": {"allowed": true, "limit_reached": false, "primary_window": {"used_percent": 40, "limit_window_seconds": 18000, "reset_at": 1}}}]`, true},
+		"reached":         {`[{"limit_name": "bengalfox", "metered_feature": "codex", "rate_limit": {"allowed": false, "limit_reached": true}}]`, false},
+		"window used up":  {`[{"limit_name": "bengalfox", "metered_feature": "codex", "rate_limit": {"allowed": true, "limit_reached": false, "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_at": 1}}}]`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := newResetBackend(t)
+			backend.usage["token-codex-team"] = free(testCase.additional)
+			manager := coreauth.NewManager(nil, nil, nil)
+			registerCodexLogin(t, manager, "codex-team", now.Add(3*time.Hour), time.Time{}, nil)
+			service := &Service{cfg: resetCreditsConfig("on"), coreManager: manager}
+
+			service.checkCodexResetCredits(context.Background(), make(map[string]*codexResetCreditState), now)
+
+			team, _ := manager.GetByID("codex-team")
+			if lifted := !codexCredentialQuotaHeld(team, time.Now()); lifted != testCase.lifted {
+				t.Fatalf("cooldown lifted = %t, want %t", lifted, testCase.lifted)
+			}
+		})
 	}
 }
 

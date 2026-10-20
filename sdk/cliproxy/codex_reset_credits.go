@@ -45,8 +45,12 @@ const (
 	// before the reset brought back.
 	codexResetCreditsAfterRedeem = 10 * time.Minute
 	// codexResetCreditsAttemptWindow is how long after asking for a reset a free
-	// login's quota cooldowns are lifted at every level: they predate the reset.
+	// login's quota cooldowns are lifted at every level when they predate the reset.
 	codexResetCreditsAttemptWindow = 30 * time.Minute
+	// codexResetCreditsInFlightSlack is how long after asking for a reset a recorded
+	// refusal still counts as predating it: requests already on their way are
+	// refused within seconds.
+	codexResetCreditsInFlightSlack = 2 * time.Minute
 	// codexResetCreditsLiftGap is how long after lifting a cooldown a login refused
 	// again keeps its new one: ChatGPT's usage and its answers disagree, and lifting
 	// again would only bring more refusals.
@@ -282,19 +286,22 @@ func codexCredentialQuotaHeld(auth *coreauth.Auth, now time.Time) bool {
 	return auth.Quota.Exceeded && strings.EqualFold(auth.Quota.Reason, "credential_quota") && auth.Quota.NextRecoverAt.After(now)
 }
 
-// codexQuotaCooldownHeld reports whether the proxy holds the credential or any of
-// its models in a cooldown caused by quota. With model-level cooling a
-// usage_limit_reached refusal cools only the model it was for.
-func codexQuotaCooldownHeld(auth *coreauth.Auth, now time.Time) bool {
-	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
-		return true
-	}
+// codexQuotaCooldownsRecordedBy reports whether the login has a model-level quota
+// cooldown and every such cooldown was recorded by deadline. A credential-wide
+// cooldown carries no recording time of its own; a refusal that sets one also
+// updates the model states, which carry it.
+func codexQuotaCooldownsRecordedBy(auth *coreauth.Auth, deadline, now time.Time) bool {
+	found := false
 	for _, state := range auth.ModelStates {
-		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
-			return true
+		if state == nil || !state.Quota.Exceeded || !state.Quota.NextRecoverAt.After(now) {
+			continue
 		}
+		if state.UpdatedAt.After(deadline) {
+			return false
+		}
+		found = true
 	}
-	return false
+	return found
 }
 
 // codexCooldownFingerprint summarizes the login's quota cooldowns, so a refusal
@@ -338,11 +345,14 @@ func codexInCooldown(auth *coreauth.Auth, now time.Time) bool {
 
 // codexUsageState is what the usage endpoint says about a login right now.
 type codexUsageState struct {
-	limitReached    bool
-	notAllowed      bool
-	windows         []coreauth.QuotaWindow
-	applicableKnown bool
-	applicable      int64
+	limitReached bool
+	notAllowed   bool
+	// additionalLimited is set when a limit of its own (one model or feature,
+	// additional_rate_limits) is reached, which the main windows do not show.
+	additionalLimited bool
+	windows           []coreauth.QuotaWindow
+	applicableKnown   bool
+	applicable        int64
 }
 
 // parseCodexUsageState reads the usage answer. It reports false unless the answer
@@ -361,6 +371,20 @@ func parseCodexUsageState(body []byte, now time.Time) (codexUsageState, bool) {
 		limitReached: limitReached.Bool(),
 		notAllowed:   !allowed.Bool(),
 	}
+	firstGJSON(root, "additional_rate_limits", "additionalRateLimits").ForEach(func(_, limit gjson.Result) bool {
+		details := firstGJSON(limit, "rate_limit", "rateLimit")
+		if firstGJSON(details, "limit_reached", "limitReached").Type == gjson.True || details.Get("allowed").Type == gjson.False {
+			usage.additionalLimited = true
+			return false
+		}
+		for _, window := range []gjson.Result{firstGJSON(details, "primary_window", "primaryWindow"), firstGJSON(details, "secondary_window", "secondaryWindow")} {
+			if used := firstGJSON(window, "used_percent", "usedPercent"); used.Type == gjson.Number && used.Float() >= 100 {
+				usage.additionalLimited = true
+				return false
+			}
+		}
+		return true
+	})
 	signals := make(map[string]string)
 	for name, values := range codexUsageQuotaHeaders(body) {
 		if len(values) > 0 {
@@ -502,7 +526,9 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 	s.coreManager.ObserveQuotaSignals(auth.ID, "codex", codexUsageQuotaHeaders(body), now)
 	until, binding, blocked := usage.block(localUntil, now)
 	if !blocked {
-		s.reconcileCodexCooldown(ctx, state, auth.ID, label, fingerprint, clock())
+		if !usage.additionalLimited {
+			s.reconcileCodexCooldown(ctx, state, auth.ID, label, fingerprint, clock())
+		}
 		return codexResetCreditsWaitBackoff
 	}
 	if usage.applicableKnown && usage.applicable <= 0 {
@@ -573,9 +599,12 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 			expiry, label, wait.Round(time.Minute), gjson.GetBytes(answer, "windows_reset").Int())
 		return codexResetCreditsAfterRedeem
 	case "nothing_to_reset":
+		// Nothing was reset, so no cooldown predates a reset.
+		state.attemptedAt = time.Time{}
 		log.Infof("codex reset credits: ChatGPT found nothing to reset for %s", label)
 		return codexResetCreditsWaitBackoff
 	case "no_credit":
+		state.attemptedAt = time.Time{}
 		return codexResetCreditsNoCreditBackoff
 	default:
 		log.Warnf("codex reset credits: unexpected answer (status %d) redeeming a reset for %s: %q", status, label, code)
@@ -584,30 +613,33 @@ func (s *Service) considerCodexResetCredit(ctx context.Context, cfg *config.Conf
 }
 
 // reconcileCodexCooldown lifts quota cooldowns the proxy holds on a login that
-// ChatGPT reports free.
+// ChatGPT reports free, with no limit of a single model or feature reached.
 //
 // A credential-wide quota cooldown is lifted whenever that happens: a reset was
 // redeemed by hand, or ChatGPT reset limits itself. Model-level quota cooldowns are
-// lifted only shortly after this check asked for a reset, when they predate it (an
-// answer that was lost, or a refusal sent before the reset); at other times one may
-// be a single model's own limit, which the usage answer does not cover.
+// lifted only when they predate a reset this check asked for: recorded by shortly
+// after it (an answer that was lost, or refusals already on their way). Any other
+// may be a model's own limit reached since.
 //
 // fingerprint is the login's cooldowns from before the usage request; a refusal
 // recorded since then is newer than the usage and stays. A login refused again soon
-// after a lift keeps its cooldown: ChatGPT's usage and its answers disagree.
+// after a lift keeps its cooldown: ChatGPT's usage and its answers disagree. The
+// comparison and the lift are not one step, so a refusal recorded in between is
+// lifted once; its next refusal is then kept by the same rule.
 func (s *Service) reconcileCodexCooldown(ctx context.Context, state *codexResetCreditState, authID, label, fingerprint string, now time.Time) {
 	current, _, settings, covered := s.codexResetCreditsCurrent(authID)
 	if !covered {
 		return
 	}
-	recent := !state.attemptedAt.IsZero() && now.Sub(state.attemptedAt) < codexResetCreditsAttemptWindow
-	if !codexCredentialQuotaHeld(current, now) && !(recent && codexQuotaCooldownHeld(current, now)) {
+	predates := !state.attemptedAt.IsZero() && now.Sub(state.attemptedAt) < codexResetCreditsAttemptWindow &&
+		codexQuotaCooldownsRecordedBy(current, state.attemptedAt.Add(codexResetCreditsInFlightSlack), now)
+	if !codexCredentialQuotaHeld(current, now) && !predates {
 		return
 	}
 	if codexCooldownFingerprint(current) != fingerprint {
 		return
 	}
-	if !recent && !state.liftedAt.IsZero() && now.Sub(state.liftedAt) < codexResetCreditsLiftGap {
+	if !predates && !state.liftedAt.IsZero() && now.Sub(state.liftedAt) < codexResetCreditsLiftGap {
 		log.Debugf("codex reset credits: %s was refused again after its cooldown was lifted at %s; leaving the new one",
 			label, state.liftedAt.Format(time.RFC3339))
 		return
