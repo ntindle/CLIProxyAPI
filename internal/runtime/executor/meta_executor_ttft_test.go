@@ -227,8 +227,13 @@ func TestMetaExecutorTTFT(t *testing.T) {
 					t.Errorf("usage = %+v, want input/output/total = 10/3/13", got)
 				}
 			}
-			if strings.Contains(forwarded.String(), "subscription") {
-				t.Errorf("subscription telemetry leaked into the response: %s", forwarded.String())
+			// The fork preserves typed quota telemetry only for streaming Responses clients.
+			wantTelemetry := !tt.nonstream && tt.httpStatus == 0 && (tt.format == "" || tt.format == sdktranslator.FormatOpenAIResponse)
+			if got := strings.Contains(forwarded.String(), `"type":"response.subscription_usage"`); got != wantTelemetry {
+				t.Errorf("typed subscription telemetry = %v, want %v: %s", got, wantTelemetry, forwarded.String())
+			}
+			if !wantTelemetry && strings.Contains(forwarded.String(), "subscription") {
+				t.Errorf("subscription telemetry leaked into a translated or non-stream response: %s", forwarded.String())
 			}
 		})
 	}
