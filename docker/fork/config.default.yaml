@@ -60,6 +60,10 @@ oauth:
       websockets: true
       # Pick up new Codex models from ChatGPT without waiting for a catalog release.
       live-models: true
+      # Spend a login's banked usage-limit resets when it is blocked for 6 hours or more,
+      # or on a shorter block when a reset is about to expire.
+      reset-credits:
+        mode: "on"
     meta:
       # Pick up new Muse models from Meta without waiting for a catalog release.
       live-models: true
