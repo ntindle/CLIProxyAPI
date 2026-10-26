@@ -266,6 +266,24 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }
 
+// OuterCredentialMap returns only the replaceable first-party Codex OAuth
+// partition. It deliberately excludes SIWC and arbitrary credential metadata.
+func (ts *CodexTokenStorage) OuterCredentialMap() map[string]any {
+	if ts == nil {
+		return nil
+	}
+	return map[string]any{
+		"id_token":      ts.IDToken,
+		"access_token":  ts.AccessToken,
+		"refresh_token": ts.RefreshToken,
+		"account_id":    ts.AccountID,
+		"last_refresh":  ts.LastRefresh,
+		"email":         ts.Email,
+		"expired":       ts.Expire,
+		"plan_type":     ts.PlanType,
+	}
+}
+
 // SaveTokenToFile serializes the Codex token storage to a JSON file under a per-file and inter-process lock,
 // reading and merging any existing JSON on disk before atomically replacing the file.
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {

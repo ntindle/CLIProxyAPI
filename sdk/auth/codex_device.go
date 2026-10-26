@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -31,6 +32,43 @@ const (
 	codexDeviceTimeout                    = 15 * time.Minute
 	codexDeviceDefaultPollIntervalSeconds = 5
 )
+
+// CodexDeviceFlow is a single-use, remote-friendly Codex device authorization.
+// The device auth identifier remains gateway-local; callers only expose the
+// verification URL and short-lived user code to the person authenticating.
+type CodexDeviceFlow struct {
+	mu           sync.Mutex
+	consumed     bool
+	httpClient   *http.Client
+	authService  *codex.CodexAuth
+	deviceAuthID string
+	userCode     string
+	pollInterval time.Duration
+}
+
+// VerificationURL returns the first-party OpenAI page used to complete the flow.
+func (f *CodexDeviceFlow) VerificationURL() string {
+	if f == nil {
+		return ""
+	}
+	return codexDeviceVerificationURL
+}
+
+// UserCode returns the short-lived code entered on the verification page.
+func (f *CodexDeviceFlow) UserCode() string {
+	if f == nil {
+		return ""
+	}
+	return f.userCode
+}
+
+// ExpiresIn reports the maximum time OpenAI allows the device flow to remain pending.
+func (f *CodexDeviceFlow) ExpiresIn() time.Duration {
+	if f == nil {
+		return 0
+	}
+	return codexDeviceTimeout
+}
 
 type codexDeviceUserCodeRequest struct {
 	ClientID string `json:"client_id"`
@@ -66,63 +104,96 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		ctx = context.Background()
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
-
-	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
+	flow, err := StartCodexDeviceFlow(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	deviceCode := strings.TrimSpace(userCodeResp.UserCode)
-	if deviceCode == "" {
-		deviceCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
-	}
-	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
-	if deviceCode == "" || deviceAuthID == "" {
-		return nil, fmt.Errorf("codex device flow did not return required fields")
-	}
-
-	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
-
 	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
+	fmt.Printf("Codex device URL: %s\n", flow.VerificationURL())
+	fmt.Printf("Codex device code: %s\n", flow.UserCode())
 
 	if !opts.NoBrowser {
 		if !browser.IsAvailable() {
 			log.Warn("No browser available; please open the device URL manually")
-		} else if errOpen := browser.OpenURL(codexDeviceVerificationURL); errOpen != nil {
+		} else if errOpen := browser.OpenURL(flow.VerificationURL()); errOpen != nil {
 			log.Warnf("Failed to open browser automatically: %v", errOpen)
 		}
 	}
 
-	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval)
+	return flow.Complete(ctx)
+}
+
+// StartCodexDeviceFlow requests a device code without opening a browser or
+// starting a loopback callback listener. This makes it safe for a remote
+// Gateway to hand the verification step to a client machine.
+func StartCodexDeviceFlow(ctx context.Context, cfg *config.Config) (*CodexDeviceFlow, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("codex device flow requires configuration")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {
 		return nil, err
 	}
+	userCode := strings.TrimSpace(userCodeResp.UserCode)
+	if userCode == "" {
+		userCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
+	}
+	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
+	if userCode == "" || deviceAuthID == "" {
+		return nil, fmt.Errorf("codex device flow did not return required fields")
+	}
+	return &CodexDeviceFlow{
+		httpClient:   httpClient,
+		authService:  codex.NewCodexAuth(cfg),
+		deviceAuthID: deviceAuthID,
+		userCode:     userCode,
+		pollInterval: parseCodexDevicePollInterval(userCodeResp.Interval),
+	}, nil
+}
 
+// Complete waits for a previously started device flow, exchanges the result,
+// and returns an unpersisted Codex auth record. A flow may be completed once.
+func (f *CodexDeviceFlow) Complete(ctx context.Context) (*coreauth.Auth, error) {
+	if f == nil || f.httpClient == nil || f.authService == nil {
+		return nil, fmt.Errorf("codex device flow is unavailable")
+	}
+	f.mu.Lock()
+	if f.consumed {
+		f.mu.Unlock()
+		return nil, fmt.Errorf("codex device flow was already completed")
+	}
+	f.consumed = true
+	f.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, codexDeviceTimeout)
+	defer cancel()
+	tokenResp, err := pollCodexDeviceToken(pollCtx, f.httpClient, f.deviceAuthID, f.userCode, f.pollInterval)
+	if err != nil {
+		return nil, err
+	}
 	authCode := strings.TrimSpace(tokenResp.AuthorizationCode)
 	codeVerifier := strings.TrimSpace(tokenResp.CodeVerifier)
 	codeChallenge := strings.TrimSpace(tokenResp.CodeChallenge)
 	if authCode == "" || codeVerifier == "" || codeChallenge == "" {
 		return nil, fmt.Errorf("codex device flow token response missing required fields")
 	}
-
-	authSvc := codex.NewCodexAuth(cfg)
-	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(
-		ctx,
+	authBundle, err := f.authService.ExchangeCodeForTokensWithRedirect(
+		pollCtx,
 		authCode,
 		codexDeviceTokenExchangeRedirectURI,
-		&codex.PKCECodes{
-			CodeVerifier:  codeVerifier,
-			CodeChallenge: codeChallenge,
-		},
+		&codex.PKCECodes{CodeVerifier: codeVerifier, CodeChallenge: codeChallenge},
 	)
 	if err != nil {
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
-
-	return a.buildAuthRecord(authSvc, authBundle)
+	return NewCodexAuthenticator().buildAuthRecord(f.authService, authBundle)
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
@@ -282,8 +353,9 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
-		"email":     tokenStorage.Email,
-		"plan_type": planType,
+		"email":      tokenStorage.Email,
+		"account_id": tokenStorage.AccountID,
+		"plan_type":  planType,
 	}
 
 	fmt.Println("Codex authentication successful")

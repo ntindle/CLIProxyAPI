@@ -26,9 +26,9 @@ type CodexWebsocketsExecutor struct {
 	store *codexWebsocketSessionStore
 }
 
-func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
+func NewCodexWebsocketsExecutor(cfg *config.Config, hardwareReauth ...CodexHardwareReauthStarter) *CodexWebsocketsExecutor {
 	return &CodexWebsocketsExecutor{
-		CodexExecutor: NewCodexExecutor(cfg),
+		CodexExecutor: NewCodexExecutor(cfg, hardwareReauth...),
 		store:         globalCodexWebsocketSessionStore,
 	}
 }
@@ -43,10 +43,10 @@ type CodexAutoExecutor struct {
 	wsExec   *CodexWebsocketsExecutor
 }
 
-func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
+func NewCodexAutoExecutor(cfg *config.Config, hardwareReauth ...CodexHardwareReauthStarter) *CodexAutoExecutor {
 	return &CodexAutoExecutor{
-		httpExec: NewCodexExecutor(cfg),
-		wsExec:   NewCodexWebsocketsExecutor(cfg),
+		httpExec: NewCodexExecutor(cfg, hardwareReauth...),
+		wsExec:   NewCodexWebsocketsExecutor(cfg, hardwareReauth...),
 	}
 }
 
