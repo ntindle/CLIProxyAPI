@@ -496,6 +496,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			observeCodexTokenEvent(reporter, payload)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			payload = e.decorateCodexHardwareReauth(ctx, auth, payload)
 			// Steering acknowledgements, pending notifications and failures are opaque:
 			// preserve their IDs, input, sequence numbers and event types byte-for-byte.
 			if strings.HasPrefix(eventType, "response.steer.") {

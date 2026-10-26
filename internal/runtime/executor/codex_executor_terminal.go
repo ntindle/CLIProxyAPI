@@ -185,7 +185,7 @@ func codexTerminalFailureStatus(body []byte) int {
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
 	switch {
-	case errorCode == "cyber_policy":
+	case normalizedCodexErrorCode(errorCode) == "cyberpolicy":
 		return http.StatusBadRequest
 	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
 		return http.StatusNotFound

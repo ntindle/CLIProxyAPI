@@ -96,6 +96,10 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// codexHardwareReauth owns short-lived, credential-bound recovery flows.
+	codexHardwareReauthMu sync.Mutex
+	codexHardwareReauth   *codexHardwareReauthCoordinator
+
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 

@@ -271,6 +271,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if runCancel != nil {
 			runCancel()
 		}
+		s.codexHardwareReauthMu.Lock()
+		codexHardwareReauth := s.codexHardwareReauth
+		s.codexHardwareReauthMu.Unlock()
+		if codexHardwareReauth != nil {
+			codexHardwareReauth.Close()
+		}
 
 		s.homeLifecycleMu.Lock()
 		if supervisor := s.homeSupervisor; supervisor != nil {
