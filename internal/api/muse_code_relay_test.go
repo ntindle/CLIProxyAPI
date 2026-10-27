@@ -16,15 +16,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 // museRelayCaptureExecutor stands in for the Meta executor and records the
 // request the relay sends upstream.
 type museRelayCaptureExecutor struct {
-	request *http.Request
-	body    []byte
-	calls   int
-	status  int
+	request  *http.Request
+	body     []byte
+	calls    int
+	status   int
+	response string
 }
 
 func (e *museRelayCaptureExecutor) Identifier() string { return "meta" }
@@ -64,10 +66,14 @@ func (e *museRelayCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, 
 	if status == 0 {
 		status = http.StatusOK
 	}
+	response := e.response
+	if response == "" {
+		response = `{"rows":[{"model_id":"muse-test"}]}`
+	}
 	return &http.Response{
 		StatusCode: status,
 		Header:     http.Header{"Content-Type": []string{"application/json"}, "Etag": []string{`"catalog-1"`}, "Set-Cookie": []string{"session=upstream"}},
-		Body:       io.NopCloser(strings.NewReader(`{"rows":[{"model_id":"muse-test"}]}`)),
+		Body:       io.NopCloser(strings.NewReader(response)),
 	}, nil
 }
 
@@ -226,5 +232,137 @@ func TestForkMuseCodeUpstreamURL(t *testing.T) {
 				t.Fatalf("URL = %q, want %q", got, testCase.want)
 			}
 		})
+	}
+}
+
+// museRelayCatalog is a Muse Code model catalog in the shape Meta serves it.
+const museRelayCatalog = `{"object":"list","data":[` +
+	`{"id":"muse-wonder-1.0","metadata":{"muse-code":{"name":"Muse Wonder"}}},` +
+	`{"id":"muse-wonder-1.0-contributor","metadata":{"muse-code":{"name":"Muse Wonder"}}},` +
+	`{"id":"muse-spark-1.2","metadata":{"muse-code":{"name":"Muse Spark 1.2"}}},` +
+	`{"id":"muse-image-1.0","metadata":{"muse-code":{"name":"Muse Image","is_hidden":true}}}]}`
+
+func museRelayCatalogRequest(server *Server) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/muse-code/models?profile=tbh", nil)
+	req.Header.Set("Authorization", "Bearer sk-muse-test")
+	req.Header.Set("If-None-Match", `"catalog-0"`)
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	return recorder
+}
+
+func museRelayHidden(t *testing.T, body []byte, id string) bool {
+	t.Helper()
+	entry := gjson.GetBytes(body, `data.#(id=="`+id+`")`)
+	if !entry.Exists() {
+		t.Fatalf("the catalog lost %s: %s", id, body)
+	}
+	return entry.Get("metadata.muse-code.is_hidden").Bool()
+}
+
+func TestForkMuseCodeRelayHidesModelsAnAliasTakesOver(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key", "auth_kind": "oauth"})
+	server.cfg.OAuthModelAlias = map[string][]proxyconfig.OAuthModelAlias{"meta": {
+		{Name: "muse-wonder-1.0-contributor", Alias: "muse-wonder-1.0", Fork: true},
+		// The model this alias runs is not in the catalog, so its ID stays offered.
+		{Name: "muse-spark-1.2-contributor", Alias: "muse-spark-1.2", Fork: true},
+	}}
+	executor.response = museRelayCatalog
+
+	recorder := museRelayCatalogRequest(server)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := executor.request.Header.Get("If-None-Match"); got != "" {
+		t.Fatalf("upstream If-None-Match = %q, want it dropped while an alias can change the catalog", got)
+	}
+	body := recorder.Body.Bytes()
+	for id, want := range map[string]bool{"muse-wonder-1.0": true, "muse-wonder-1.0-contributor": false, "muse-spark-1.2": false, "muse-image-1.0": true} {
+		if got := museRelayHidden(t, body, id); got != want {
+			t.Errorf("%s is_hidden = %t, want %t", id, got, want)
+		}
+	}
+	if got := gjson.GetBytes(body, `data.#(id=="muse-wonder-1.0").metadata.muse-code.name`).String(); got != "Muse Wonder" {
+		t.Fatalf("hidden entry name = %q, want the rest of the entry unchanged", got)
+	}
+	if got := recorder.Header().Get("Etag"); got != "" {
+		t.Fatalf("Etag = %q, want Meta's validator dropped for a changed catalog", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+}
+
+func TestForkMuseCodeRelayLeavesTheCatalogAloneWithoutAnAlias(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		attributes map[string]string
+		aliases    map[string][]proxyconfig.OAuthModelAlias
+	}{
+		{name: "no alias", attributes: map[string]string{"api_key": "meta-key", "auth_kind": "oauth"}},
+		{
+			name:       "alias for another channel",
+			attributes: map[string]string{"api_key": "meta-key", "auth_kind": "oauth"},
+			aliases:    map[string][]proxyconfig.OAuthModelAlias{"codex": {{Name: "muse-wonder-1.0-contributor", Alias: "muse-wonder-1.0"}}},
+		},
+		// A request on a Meta API key gets no OAuth model alias, so its catalog keeps every model.
+		{
+			name:       "Meta API key",
+			attributes: map[string]string{"api_key": "meta-key"},
+			aliases:    map[string][]proxyconfig.OAuthModelAlias{"meta": {{Name: "muse-wonder-1.0-contributor", Alias: "muse-wonder-1.0"}}},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, executor := museRelayTestServer(t, testCase.attributes)
+			server.cfg.OAuthModelAlias = testCase.aliases
+			executor.response = museRelayCatalog
+
+			recorder := museRelayCatalogRequest(server)
+			if got := recorder.Body.String(); got != museRelayCatalog {
+				t.Fatalf("body = %s, want Meta's catalog unchanged", got)
+			}
+			if got := executor.request.Header.Get("If-None-Match"); got != `"catalog-0"` {
+				t.Fatalf("upstream If-None-Match = %q, want it forwarded", got)
+			}
+			if got := recorder.Header().Get("Etag"); got != `"catalog-1"` {
+				t.Fatalf("Etag = %q, want it relayed", got)
+			}
+		})
+	}
+}
+
+func TestForkMuseCodeShadowedModelsPrefersTheCredentialsOwnAlias(t *testing.T) {
+	selected := &auth.Auth{Provider: "meta", Attributes: map[string]string{"auth_kind": "oauth"}}
+	auth.SetOAuthModelAliasesAttribute(selected, []proxyconfig.OAuthModelAlias{{Name: "muse-own-contributor", Alias: "muse-wonder-1.0"}})
+	cfg := &proxyconfig.Config{OAuthModelAlias: map[string][]proxyconfig.OAuthModelAlias{"Meta": {
+		{Name: "muse-wonder-1.0-contributor", Alias: "muse-wonder-1.0"},
+		{Name: "muse-spark-1.3-contributor", Alias: "MUSE-SPARK-1.3"},
+		{Name: "muse-spark-1.2", Alias: "muse-spark-1.2"},
+	}}}
+
+	got := museCodeShadowedModels(cfg, selected)
+	want := map[string]string{"muse-wonder-1.0": "muse-own-contributor", "muse-spark-1.3": "muse-spark-1.3-contributor"}
+	if len(got) != len(want) {
+		t.Fatalf("shadowed = %v, want %v", got, want)
+	}
+	for alias, name := range want {
+		if got[alias] != name {
+			t.Fatalf("shadowed[%s] = %q, want %q (all: %v)", alias, got[alias], name, got)
+		}
+	}
+}
+
+func TestForkHideShadowedMuseCodeModelsKeepsBodiesItDoesNotRead(t *testing.T) {
+	shadowed := map[string]string{"muse-test": "muse-test-contributor"}
+	for _, body := range []string{
+		`{"rows":[{"model_id":"muse-test"}]}`,
+		`not json`,
+		// Entries without Muse Code metadata are not Muse Code catalog rows.
+		`{"data":[{"id":"muse-test"},{"id":"muse-test-contributor"}]}`,
+	} {
+		got, changed := hideShadowedMuseCodeModels([]byte(body), shadowed)
+		if changed || string(got) != body {
+			t.Fatalf("hideShadowedMuseCodeModels(%s) = %s, %t; want it unchanged", body, got, changed)
+		}
 	}
 }
