@@ -23,6 +23,7 @@ Everything upstream documents still applies. This page covers only what the fork
 | `client.key-scopes` | none | Limit a client API key to the credentials of the providers it lists. |
 | (no setting) | on | Serve the Muse Code client endpoints (`/muse-code/models` and friends) so the Muse CLI can use the proxy. |
 | (no setting) | on | Record Meta's subscription usage on the credential and pass its event through to Responses clients. |
+| (no setting) | on | Report a pool that is out of Codex quota as a usage limit Codex stops on, with its reset time. Proposed upstream as [router-for-me/CLIProxyAPI#7184](https://github.com/router-for-me/CLIProxyAPI/pull/7184). |
 
 `docker/fork/config.default.yaml`, the configuration the image writes on first start, has every
 one of them turned on. `config.example.yaml` is left exactly as upstream ships it, so it does not
@@ -238,6 +239,25 @@ executor test and the fork quota tests cover it.
 Reloading a credential file from disk keeps its last observation, since the file does not store
 it. This applies to every provider.
 
+### Codex usage limits
+
+When every credential a request may use is cooling down on Codex's `429 usage_limit_reached`,
+upstream answers `model_cooldown` with a `Retry-After` as long as the quota window. Codex knows a
+usage limit only by `error.type`, so it retries instead: over WebSocket the proxy closes the
+connection silently five times, then over HTTPS Codex sleeps until `Retry-After`, hours or days.
+While the first reset is more than five minutes away, the fork answers instead with:
+
+- the `model_cooldown` body plus `type: "usage_limit_reached"`, `resets_at`, `retryable: false` and
+  `limit_window_minutes`;
+- `X-Should-Retry: false` and Codex's rate-limit headers for the window that reopens first
+  (`X-Codex-Primary-*` for 5 hours, `X-Codex-Secondary-*` for a week), instead of `Retry-After`;
+- the same refusal as a WebSocket `error` event.
+
+Codex then stops the turn and reports when to retry, and T3 Code shows the thread as Limited with
+"Resume at reset". The evidence is the refusal each credential's cooldown recorded; a pool with any
+other 429 keeps the retryable answer. The body matches router-for-me/CLIProxyAPI#6647, which
+fixes the same upstream issue more broadly.
+
 ## Container image
 
 `ghcr.io/ntindle/cliproxyapi:latest` is built by `.github/workflows/fork-image.yml` from
@@ -313,5 +333,7 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `sdk/cliproxy/auth/quota_signals.go` | Accepts the `X-Meta-*` quota signals. |
 | `sdk/cliproxy/auth/conductor_lifecycle.go` | Keeps the quota observation when a credential file is reloaded. |
 | `sdk/api/handlers/openai/openai_responses_handlers.go` | Passes the subscription usage event after the terminal event. |
+| `sdk/cliproxy/auth/selector.go`, `sdk/cliproxy/auth/scheduler.go`, `sdk/cliproxy/auth/conductor_selection.go` | Report an out-of-quota Codex pool as a usage limit (until #7184 merges). |
+| `sdk/api/handlers/handlers_errors.go`, `sdk/api/handlers/openai/openai_responses_websocket_forward.go` | Send that usage limit's headers, and its WebSocket error event (until #7184 merges). |
 
 Everything else the fork adds lives in files upstream does not have.
