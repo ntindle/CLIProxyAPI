@@ -183,11 +183,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 }
 
 func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
-	// Like WriteErrorResponse, keep the safe Retry-After; the upstream's own wins.
+	// Like WriteErrorResponse, keep the safe error headers; the upstream's own win.
 	if msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
+		WriteSafeErrorHeaders(c.Writer.Header(), msg.Error)
 	}
 	for key, values := range FilterUpstreamHeaders(msg.Headers) {
 		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
