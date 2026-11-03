@@ -124,9 +124,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		return
 	}
 	if msg != nil && msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
+		WriteSafeErrorHeaders(c.Writer.Header(), msg.Error)
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
@@ -149,6 +147,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if msg != nil && msg.Error != nil {
 		if v := strings.TrimSpace(msg.Error.Error()); v != "" {
 			errText = v
+		}
+		if usageLimit, ok := coreauth.UsageLimitResponseText(msg.Error); ok {
+			errText = usageLimit
 		}
 	}
 
@@ -182,11 +183,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 }
 
 func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
-	// Like WriteErrorResponse, keep the safe Retry-After; the upstream's own wins.
+	// Like WriteErrorResponse, keep the safe error headers; the upstream's own win.
 	if msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
+		WriteSafeErrorHeaders(c.Writer.Header(), msg.Error)
 	}
 	for key, values := range FilterUpstreamHeaders(msg.Headers) {
 		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
@@ -204,6 +203,19 @@ func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorM
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// WriteSafeErrorHeaders adds the client-safe headers err carries: Retry-After,
+// or for a final usage limit X-Should-Retry and Codex's rate-limit headers.
+func WriteSafeErrorHeaders(dst http.Header, err error) {
+	for key, values := range coreauth.SafeResponseHeaders(err) {
+		if http.CanonicalHeaderKey(key) == "Content-Type" {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {

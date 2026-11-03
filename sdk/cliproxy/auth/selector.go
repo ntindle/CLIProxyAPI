@@ -90,6 +90,9 @@ type modelCooldownError struct {
 	// refusal is the upstream quota refusal clients get instead of the
 	// model_cooldown body; see upstreamQuotaRefusal.
 	refusal []byte
+	// usageLimit is set when every candidate is out of Codex quota; the
+	// response then reports a final usage limit. See usageLimitRefusalFor.
+	usageLimit *usageLimitRefusal
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
@@ -152,6 +155,19 @@ func (e *modelCooldownError) ResponseBody() []byte {
 	return e.refusal
 }
 
+func (e *modelCooldownError) withUsageLimit(refusal *usageLimitRefusal) *modelCooldownError {
+	if e != nil {
+		e.usageLimit = refusal
+	}
+	return e
+}
+
+// IsUsageLimitReached reports whether every candidate credential is out of
+// quota until a known reset, so clients should stop instead of retrying.
+func (e *modelCooldownError) IsUsageLimitReached() bool {
+	return e != nil && e.usageLimit != nil
+}
+
 func (e *modelCooldownError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -184,6 +200,17 @@ func (e *modelCooldownError) Error() string {
 		"model":         e.model,
 		"reset_time":    displayDuration.String(),
 		"reset_seconds": resetSeconds,
+	}
+	if e.usageLimit != nil {
+		// Codex classifies a 429 by error.type: usage_limit_reached ends the
+		// turn and resets_at says when to come back. The code stays
+		// model_cooldown so existing consumers keep matching on it.
+		errorBody["type"] = "usage_limit_reached"
+		errorBody["resets_at"] = e.usageLimit.resetAt.Unix()
+		errorBody["retryable"] = false
+		if e.usageLimit.windowMinutes > 0 {
+			errorBody["limit_window_minutes"] = e.usageLimit.windowMinutes
+		}
 	}
 	if e.provider != "" {
 		errorBody["provider"] = e.provider
@@ -393,6 +420,14 @@ func (e *modelCooldownError) StatusCode() int {
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
+	if e.usageLimit != nil {
+		// No Retry-After: a client that honors it sleeps through the whole
+		// window. X-Should-Retry is honored by the official OpenAI and
+		// Anthropic SDKs ahead of the status code.
+		headers.Set("X-Should-Retry", "false")
+		e.usageLimit.codexRateLimitHeaders(headers)
+		return headers
+	}
 	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
 	if resetSeconds < 0 {
 		resetSeconds = 0
@@ -576,7 +611,8 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
+			usageLimit := usageLimitRefusalFor(auths, func(*Auth) string { return model }, now)
+			return nil, newModelCooldownError(model, providerForError, resetIn).withUsageLimit(usageLimit)
 		}
 		return nil, newAuthUnavailableError(earliest, now)
 	}
