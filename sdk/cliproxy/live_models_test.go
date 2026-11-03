@@ -341,7 +341,7 @@ func TestForkSyncLiveModelsRegistersMetaModels(t *testing.T) {
 	if len(paths) != 1 || paths[0] != metaModelsPath {
 		t.Fatalf("requests = %v, want one read of %s", paths, metaModelsPath)
 	}
-	if authorization != "Bearer meta-minted-key" || clientID != "tbh:tui" {
+	if authorization != "Bearer meta-minted-key" || clientID != "tbh:exec" {
 		t.Fatalf("catalog request carried Authorization %q and X-Client-Id %q", authorization, clientID)
 	}
 }

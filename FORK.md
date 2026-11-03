@@ -315,3 +315,9 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `sdk/api/handlers/openai/openai_responses_handlers.go` | Passes the subscription usage event after the terminal event. |
 
 Everything else the fork adds lives in files upstream does not have.
+
+Since v8.0.52 upstream parses and edits JSON with `github.com/MoeForge/moego/ojson`, which has the
+`gjson` and `sjson` API in one package, and no longer depends on `tidwall/gjson` or `tidwall/sjson`.
+Fork code uses `ojson` as well. A fork change written against an older base still imports
+`tidwall/*` and fails to build after a sync: switch the import and rename `gjson.`/`sjson.` to
+`ojson.`.

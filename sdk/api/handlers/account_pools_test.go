@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 func TestForkAccountPoolsModelListAndPolicyRefresh(t *testing.T) {
@@ -26,7 +26,7 @@ func TestForkAccountPoolsModelListAndPolicyRefresh(t *testing.T) {
 	c, _ := keyScopeRequestContext("review-key")
 	body := []byte(`{"data":[{"id":"` + keyScopeClaudeModel + `"},{"id":"pool-personal-only"}]}`)
 	filtered := h.scopeModelList(c, body)
-	if gjson.GetBytes(filtered, "data.#").Int() != 1 || gjson.GetBytes(filtered, "data.0.id").String() != keyScopeClaudeModel {
+	if ojson.GetBytes(filtered, "data.#").Int() != 1 || ojson.GetBytes(filtered, "data.0.id").String() != keyScopeClaudeModel {
 		t.Fatalf("model list leaked: %s", filtered)
 	}
 	ctx := context.WithValue(context.Background(), "gin", c)

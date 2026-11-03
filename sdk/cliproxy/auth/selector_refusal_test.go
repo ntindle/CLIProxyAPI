@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // metaQuotaRefusal is Meta's 429 when a subscription window runs out.
@@ -33,7 +33,7 @@ func TestModelCooldownError_PassesMetaQuotaRefusalThrough(t *testing.T) {
 		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusTooManyRequests)
 	}
 	// Logs and Home dispatch keep reading the model_cooldown body.
-	if got := gjson.Get(err.Error(), "error.code").String(); got != "model_cooldown" {
+	if got := ojson.Get(err.Error(), "error.code").String(); got != "model_cooldown" {
 		t.Fatalf("Error() code = %q, want model_cooldown", got)
 	}
 }

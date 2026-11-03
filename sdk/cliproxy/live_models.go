@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -310,7 +310,7 @@ func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provi
 		}
 		// An answer without the list is not an empty catalog; failing keeps the
 		// models found last time and retries after the backoff.
-		if !gjson.GetBytes(body, "data").IsArray() {
+		if !ojson.GetBytes(body, "data").IsArray() {
 			return nil, fmt.Errorf("model catalog response has no data list")
 		}
 		return parseMetaLiveModels(body), nil
@@ -362,7 +362,7 @@ func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byt
 // parseClaudeLiveModels reads the Anthropic model list response.
 func parseClaudeLiveModels(body []byte) []liveModel {
 	var models []liveModel
-	gjson.GetBytes(body, "data").ForEach(func(_, entry gjson.Result) bool {
+	ojson.GetBytes(body, "data").ForEach(func(_, entry ojson.Result) bool {
 		id := strings.TrimSpace(entry.Get("id").String())
 		if id == "" || !strings.HasPrefix(strings.ToLower(id), "claude") {
 			return true
@@ -387,7 +387,7 @@ func parseClaudeLiveModels(body []byte) []liveModel {
 // parseCodexLiveModels reads the Codex client model catalog response.
 func parseCodexLiveModels(body []byte) []liveModel {
 	var models []liveModel
-	gjson.GetBytes(body, "models").ForEach(func(_, entry gjson.Result) bool {
+	ojson.GetBytes(body, "models").ForEach(func(_, entry ojson.Result) bool {
 		slug := strings.TrimSpace(entry.Get("slug").String())
 		if slug == "" {
 			return true
@@ -398,19 +398,19 @@ func parseCodexLiveModels(body []byte) []liveModel {
 			description:   strings.TrimSpace(entry.Get("description").String()),
 			contextLength: int(entry.Get("context_window").Int()),
 		}
-		entry.Get("supported_reasoning_levels").ForEach(func(_, level gjson.Result) bool {
+		entry.Get("supported_reasoning_levels").ForEach(func(_, level ojson.Result) bool {
 			if effort := strings.TrimSpace(level.Get("effort").String()); effort != "" {
 				model.thinkingLevels = append(model.thinkingLevels, effort)
 			}
 			return true
 		})
-		entry.Get("input_modalities").ForEach(func(_, modality gjson.Result) bool {
+		entry.Get("input_modalities").ForEach(func(_, modality ojson.Result) bool {
 			if value := strings.TrimSpace(modality.String()); value != "" {
 				model.inputModalities = append(model.inputModalities, value)
 			}
 			return true
 		})
-		entry.Get("available_in_plans").ForEach(func(_, plan gjson.Result) bool {
+		entry.Get("available_in_plans").ForEach(func(_, plan ojson.Result) bool {
 			if value := strings.ToLower(strings.TrimSpace(plan.String())); value != "" {
 				model.plans = append(model.plans, value)
 			}
@@ -428,7 +428,7 @@ func parseCodexLiveModels(body []byte) []liveModel {
 // that do not answer in text, are skipped.
 func parseMetaLiveModels(body []byte) []liveModel {
 	var models []liveModel
-	gjson.GetBytes(body, "data").ForEach(func(_, entry gjson.Result) bool {
+	ojson.GetBytes(body, "data").ForEach(func(_, entry ojson.Result) bool {
 		id := strings.TrimSpace(entry.Get("id").String())
 		museCode := entry.Get("metadata.muse-code")
 		if !strings.HasPrefix(strings.ToLower(id), "muse-") || !museCode.Exists() || museCode.Get("is_hidden").Bool() {
@@ -446,7 +446,7 @@ func parseMetaLiveModels(body []byte) []liveModel {
 			maxCompletionTokens: int(museCode.Get("limit.output").Int()),
 		}
 		efforts := make(map[string]bool)
-		museCode.Get("variants").ForEach(func(name, variant gjson.Result) bool {
+		museCode.Get("variants").ForEach(func(name, variant ojson.Result) bool {
 			effort := strings.TrimSpace(variant.Get("reasoningEffort").String())
 			if effort == "" {
 				effort = strings.TrimSpace(name.String())
@@ -462,7 +462,7 @@ func parseMetaLiveModels(body []byte) []liveModel {
 		if reasoning := museCode.Get("reasoning"); reasoning.Exists() && !reasoning.Bool() {
 			model.noThinking, model.thinkingLevels = true, nil
 		}
-		museCode.Get("modalities.input").ForEach(func(_, modality gjson.Result) bool {
+		museCode.Get("modalities.input").ForEach(func(_, modality ojson.Result) bool {
 			if value := strings.TrimSpace(modality.String()); value != "" {
 				model.inputModalities = append(model.inputModalities, value)
 			}
@@ -474,9 +474,9 @@ func parseMetaLiveModels(body []byte) []liveModel {
 	return models
 }
 
-func gjsonArrayContains(values gjson.Result, target string) bool {
+func gjsonArrayContains(values ojson.Result, target string) bool {
 	found := false
-	values.ForEach(func(_, value gjson.Result) bool {
+	values.ForEach(func(_, value ojson.Result) bool {
 		found = strings.EqualFold(strings.TrimSpace(value.String()), target)
 		return !found
 	})

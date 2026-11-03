@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
-	"github.com/tidwall/gjson"
 )
 
 // MetaSubscriptionUsageEventType is the Responses stream event Meta sends after
@@ -39,10 +39,10 @@ const (
 // seconds. A window without a percentage or reset time is dropped, and an event
 // with no usable window returns nil.
 func ParseMetaSubscriptionUsageHeaders(payload []byte) http.Header {
-	if len(payload) == 0 || gjson.GetBytes(payload, "type").String() != MetaSubscriptionUsageEventType {
+	if len(payload) == 0 || ojson.GetBytes(payload, "type").String() != MetaSubscriptionUsageEventType {
 		return nil
 	}
-	return metaSubscriptionUsageHeaders(gjson.GetBytes(payload, "subscription"))
+	return metaSubscriptionUsageHeaders(ojson.GetBytes(payload, "subscription"))
 }
 
 // ParseMetaSubscriptionUsageSSE finds the last response.subscription_usage
@@ -73,14 +73,14 @@ func ObserveMetaSubscriptionUsageSSE(ctx context.Context, body []byte) {
 	logging.MergeResponseHeaders(ctx, ParseMetaSubscriptionUsageSSE(body))
 }
 
-func metaSubscriptionUsageHeaders(subscription gjson.Result) http.Header {
+func metaSubscriptionUsageHeaders(subscription ojson.Result) http.Header {
 	if !subscription.IsObject() {
 		return nil
 	}
 	headers := make(http.Header)
 	window := subscription.Get("window")
 	minutes := window.Get("window_duration_mins")
-	if used, reset, ok := metaQuotaWindow(window); ok && minutes.Type == gjson.Number && minutes.Int() > 0 {
+	if used, reset, ok := metaQuotaWindow(window); ok && minutes.Type == ojson.Number && minutes.Int() > 0 {
 		headers.Set(MetaQuotaWindowUsedHeader, used)
 		headers.Set(MetaQuotaWindowMinutesHeader, strconv.FormatInt(minutes.Int(), 10))
 		headers.Set(MetaQuotaWindowResetHeader, reset)
@@ -100,13 +100,13 @@ func metaSubscriptionUsageHeaders(subscription gjson.Result) http.Header {
 	return headers
 }
 
-func metaQuotaWindow(window gjson.Result) (used, reset string, ok bool) {
+func metaQuotaWindow(window ojson.Result) (used, reset string, ok bool) {
 	if !window.IsObject() {
 		return "", "", false
 	}
 	usedPercent := window.Get("used_percent")
 	resetsAt := window.Get("resets_at")
-	if usedPercent.Type != gjson.Number || usedPercent.Float() < 0 || resetsAt.Type != gjson.Number || resetsAt.Int() <= 0 {
+	if usedPercent.Type != ojson.Number || usedPercent.Float() < 0 || resetsAt.Type != ojson.Number || resetsAt.Int() <= 0 {
 		return "", "", false
 	}
 	return strings.TrimSpace(usedPercent.Raw), strconv.FormatInt(resetsAt.Int(), 10), true

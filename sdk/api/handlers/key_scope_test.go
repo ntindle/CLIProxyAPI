@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -136,7 +136,7 @@ func TestForkScopeProvidersNarrowsAndRejects(t *testing.T) {
 		t.Fatalf("rejection status = %d, want 400", errMsg.StatusCode)
 	}
 	body := errMsg.Error.Error()
-	if gjson.Get(body, "error.code").String() != "model_not_found" || !strings.Contains(gjson.Get(body, "error.message").String(), keyScopeCodexModel) {
+	if ojson.Get(body, "error.code").String() != "model_not_found" || !strings.Contains(ojson.Get(body, "error.message").String(), keyScopeCodexModel) {
 		t.Fatalf("rejection body = %s", body)
 	}
 	rejection := errMsg
@@ -165,7 +165,7 @@ func TestForkScopeModelListFiltersEveryListShape(t *testing.T) {
 
 	ids := func(body []byte, listKey, field string) []string {
 		var out []string
-		gjson.GetBytes(body, listKey).ForEach(func(_, entry gjson.Result) bool {
+		ojson.GetBytes(body, listKey).ForEach(func(_, entry ojson.Result) bool {
 			out = append(out, entry.Get(field).String())
 			return true
 		})
@@ -196,10 +196,10 @@ func TestForkScopeModelListFiltersEveryListShape(t *testing.T) {
 	if got := ids(scopedAnthropic, "data", "id"); !equal(got, []string{keyScopeClaudeModel, keyScopeSharedModel}) {
 		t.Fatalf("Anthropic list for a Claude key = %v", got)
 	}
-	if first, last := gjson.GetBytes(scopedAnthropic, "first_id").String(), gjson.GetBytes(scopedAnthropic, "last_id").String(); first != keyScopeClaudeModel || last != keyScopeSharedModel {
+	if first, last := ojson.GetBytes(scopedAnthropic, "first_id").String(), ojson.GetBytes(scopedAnthropic, "last_id").String(); first != keyScopeClaudeModel || last != keyScopeSharedModel {
 		t.Fatalf("Anthropic first_id/last_id = %q/%q", first, last)
 	}
-	if !gjson.GetBytes(scopedAnthropic, "has_more").Exists() {
+	if !ojson.GetBytes(scopedAnthropic, "has_more").Exists() {
 		t.Fatal("unrelated list fields were dropped")
 	}
 
@@ -237,7 +237,7 @@ func TestForkWriteModelListResponseAppliesKeyScope(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	data := gjson.GetBytes(recorder.Body.Bytes(), "data").Array()
+	data := ojson.GetBytes(recorder.Body.Bytes(), "data").Array()
 	if len(data) != 1 || data[0].Get("id").String() != keyScopeCodexModel {
 		t.Fatalf("written list = %s, want only the Codex model", recorder.Body.String())
 	}

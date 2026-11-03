@@ -6,11 +6,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // homeProvider is the routing provider used in Home mode, where credentials
@@ -108,7 +107,7 @@ func (h *BaseAPIHandler) scopeProviders(ctx context.Context, modelName string) f
 			return kept, normalizedModel, nil
 		}
 		body := `{"error":{"message":"","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
-		body, errSet := sjson.Set(body, "error.message", "model "+modelName+" is not available to this API key")
+		body, errSet := ojson.Set(body, "error.message", "model "+modelName+" is not available to this API key")
 		if errSet != nil {
 			body = `{"error":{"message":"model is not available to this API key","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
 		}
@@ -122,18 +121,18 @@ func (h *BaseAPIHandler) scopeProviders(ctx context.Context, modelName string) f
 // (Codex, Gemini), with the model named by id, slug, model or name.
 func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
 	allowed, scoped := h.keyScope(c)
-	if !scoped || !gjson.ValidBytes(body) {
+	if !scoped || !ojson.ValidBytes(body) {
 		return body
 	}
 	modelRegistry := registry.GetGlobalRegistry()
 	for _, listKey := range []string{"data", "models"} {
-		list := gjson.GetBytes(body, listKey)
+		list := ojson.GetBytes(body, listKey)
 		if !list.IsArray() {
 			continue
 		}
 		kept := make([]string, 0, len(list.Array()))
 		firstID, lastID := "", ""
-		list.ForEach(func(_, entry gjson.Result) bool {
+		list.ForEach(func(_, entry ojson.Result) bool {
 			id := modelListEntryID(entry)
 			if id == "" {
 				return true
@@ -153,15 +152,15 @@ func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
 			}
 			return true
 		})
-		scopedBody, errSet := sjson.SetRawBytes(body, listKey, []byte("["+strings.Join(kept, ",")+"]"))
+		scopedBody, errSet := ojson.SetRawBytes(body, listKey, []byte("["+strings.Join(kept, ",")+"]"))
 		if errSet != nil {
 			return body
 		}
 		body = scopedBody
 		// The Anthropic list names its first and last entries.
 		for field, value := range map[string]string{"first_id": firstID, "last_id": lastID} {
-			if gjson.GetBytes(body, field).Exists() {
-				if updated, errField := sjson.SetBytes(body, field, value); errField == nil {
+			if ojson.GetBytes(body, field).Exists() {
+				if updated, errField := ojson.SetBytes(body, field, value); errField == nil {
 					body = updated
 				}
 			}
@@ -170,7 +169,7 @@ func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
 	return body
 }
 
-func modelListEntryID(entry gjson.Result) string {
+func modelListEntryID(entry ojson.Result) string {
 	for _, field := range []string{"id", "slug", "model", "name"} {
 		if value := strings.TrimSpace(entry.Get(field).String()); value != "" {
 			return strings.TrimPrefix(value, "models/")
