@@ -127,7 +127,8 @@ func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
 
 // ClientConfig configures client-facing compatibility behavior.
 type ClientConfig struct {
-	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+	Codex  CodexClientConfig  `yaml:"codex" json:"codex"`
+	Claude ClaudeClientConfig `yaml:"claude" json:"claude"`
 
 	// NativeModelLists narrows the model list each native client is shown to the
 	// models of its own provider: Claude Code sees Claude models only and Codex sees
@@ -142,6 +143,13 @@ type ClientConfig struct {
 
 	// AccountPools names reusable sets of credentials without duplicating their state.
 	AccountPools *[]ClientAccountPool `yaml:"account-pools,omitempty" json:"account-pools,omitempty"`
+}
+
+// ClaudeClientConfig controls client-facing Claude protocol compatibility.
+type ClaudeClientConfig struct {
+	// ShowCodexCommentary mirrors public Codex progress into visible Claude text.
+	// Default false preserves the existing hidden-commentary behavior.
+	ShowCodexCommentary bool `yaml:"show-codex-commentary" json:"show-codex-commentary"`
 }
 
 // ClientKeyScope limits the client API keys starting with KeyPrefix to Providers.

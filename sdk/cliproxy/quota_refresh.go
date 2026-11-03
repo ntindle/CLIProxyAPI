@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -180,7 +180,7 @@ func (s *Service) fetchQuotaSignals(ctx context.Context, cfg *config.Config, pro
 // the headers use a fraction and unix seconds.
 func claudeUsageQuotaHeaders(body []byte) http.Header {
 	headers := make(http.Header)
-	root := gjson.ParseBytes(body)
+	root := ojson.ParseBytes(body)
 	for _, window := range []struct{ key, label string }{
 		{"five_hour", "5h"},
 		{"seven_day", "7d"},
@@ -190,7 +190,7 @@ func claudeUsageQuotaHeaders(body []byte) http.Header {
 			continue
 		}
 		prefix := "Anthropic-Ratelimit-Unified-" + window.label + "-"
-		if utilization := node.Get("utilization"); utilization.Type == gjson.Number && utilization.Float() >= 0 {
+		if utilization := node.Get("utilization"); utilization.Type == ojson.Number && utilization.Float() >= 0 {
 			headers.Set(prefix+"Utilization", strconv.FormatFloat(utilization.Float()/100, 'f', -1, 64))
 		}
 		if resetsAt := strings.TrimSpace(node.Get("resets_at").String()); resetsAt != "" {
@@ -206,7 +206,7 @@ func claudeUsageQuotaHeaders(body []byte) http.Header {
 // headers that Responses requests carry.
 func codexUsageQuotaHeaders(body []byte) http.Header {
 	headers := make(http.Header)
-	root := gjson.ParseBytes(body)
+	root := ojson.ParseBytes(body)
 	rateLimit := root.Get("rate_limit")
 	if !rateLimit.IsObject() {
 		rateLimit = root.Get("rateLimit")
@@ -223,16 +223,16 @@ func codexUsageQuotaHeaders(body []byte) http.Header {
 			continue
 		}
 		prefix := "X-Codex-" + window.label + "-"
-		if used := firstGJSON(node, "used_percent", "usedPercent"); used.Type == gjson.Number && used.Float() >= 0 {
+		if used := firstGJSON(node, "used_percent", "usedPercent"); used.Type == ojson.Number && used.Float() >= 0 {
 			headers.Set(prefix+"Used-Percent", strconv.FormatFloat(used.Float(), 'f', -1, 64))
 		}
-		if seconds := firstGJSON(node, "limit_window_seconds", "limitWindowSeconds"); seconds.Type == gjson.Number && seconds.Float() > 0 {
+		if seconds := firstGJSON(node, "limit_window_seconds", "limitWindowSeconds"); seconds.Type == ojson.Number && seconds.Float() > 0 {
 			headers.Set(prefix+"Window-Minutes", strconv.FormatInt(int64(seconds.Float()/60), 10))
 		}
-		if resetAt := firstGJSON(node, "reset_at", "resetAt"); resetAt.Type == gjson.Number && resetAt.Int() > 0 {
+		if resetAt := firstGJSON(node, "reset_at", "resetAt"); resetAt.Type == ojson.Number && resetAt.Int() > 0 {
 			headers.Set(prefix+"Reset-At", strconv.FormatInt(resetAt.Int(), 10))
 		}
-		if resetAfter := firstGJSON(node, "reset_after_seconds", "resetAfterSeconds"); resetAfter.Type == gjson.Number && resetAfter.Int() >= 0 {
+		if resetAfter := firstGJSON(node, "reset_after_seconds", "resetAfterSeconds"); resetAfter.Type == ojson.Number && resetAfter.Int() >= 0 {
 			headers.Set(prefix+"Reset-After-Seconds", strconv.FormatInt(resetAfter.Int(), 10))
 		}
 	}
@@ -245,11 +245,11 @@ func codexUsageQuotaHeaders(body []byte) http.Header {
 	return headers
 }
 
-func firstGJSON(node gjson.Result, keys ...string) gjson.Result {
+func firstGJSON(node ojson.Result, keys ...string) ojson.Result {
 	for _, key := range keys {
 		if value := node.Get(key); value.Exists() {
 			return value
 		}
 	}
-	return gjson.Result{}
+	return ojson.Result{}
 }

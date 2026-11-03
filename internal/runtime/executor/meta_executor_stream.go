@@ -9,12 +9,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -180,7 +180,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				continue
 			}
 			eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
-			eventType := gjson.GetBytes(eventData, "type").String()
+			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			if isMetaSubscriptionUsageEvent(eventType, eventData) {
 				// The fork records quota for routing and preserves the typed event for
 				// Muse's Responses client. Other formats retain upstream filtering.
@@ -200,7 +200,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			if filteringSubscriptionUsage {
 				if eventType == "" {
 					pendingEventLine = nil
-					if gjson.ValidBytes(eventData) {
+					if ojson.ValidBytes(eventData) {
 						filteringSubscriptionUsage = false
 					}
 					skipFilteredBlankLine = true
