@@ -254,9 +254,19 @@ While the first reset is more than five minutes away, the fork answers instead w
 - the same refusal as a WebSocket `error` event.
 
 Codex then stops the turn and reports when to retry, and T3 Code shows the thread as Limited with
-"Resume at reset". The evidence is the refusal each credential's cooldown recorded; a pool with any
-other 429 keeps the retryable answer. The body matches router-for-me/CLIProxyAPI#6647, which
-fixes the same upstream issue more broadly.
+"Resume at reset".
+
+- **Evidence.** The evidence is Codex's refusal itself. When the refusal sets a credential's
+  cooldown, the fork marks that cooldown, so a later error on the credential (a stream that ends in
+  a 502) cannot undo it. The mark is persisted with the cooldown, so it survives a restart.
+- **What stays retryable.** A pool with any other 429 keeps the retryable answer. So does a
+  request pinned to one credential: that pick says nothing about the rest of the pool, and a
+  WebSocket turn whose pinned credential ran out reconnects onto another one.
+- **Routes.** Every error writer sends these headers, including the Claude Messages, Codex search
+  and Codex live routes.
+
+The body matches router-for-me/CLIProxyAPI#6647, which fixes the same upstream issue more
+broadly.
 
 ## Container image
 
@@ -334,7 +344,9 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `sdk/cliproxy/auth/conductor_lifecycle.go` | Keeps the quota observation when a credential file is reloaded. |
 | `sdk/api/handlers/openai/openai_responses_handlers.go` | Passes the subscription usage event after the terminal event. |
 | `sdk/cliproxy/auth/selector.go`, `sdk/cliproxy/auth/scheduler.go`, `sdk/cliproxy/auth/conductor_selection.go` | Report an out-of-quota Codex pool as a usage limit (until #7184 merges). |
-| `sdk/api/handlers/handlers_errors.go`, `sdk/api/handlers/openai/openai_responses_websocket_forward.go` | Send that usage limit's headers, and its WebSocket error event (until #7184 merges). |
+| `sdk/cliproxy/auth/conductor_selection.go` (`SelectAuth*`), `sdk/cliproxy/auth/conductor_execution.go` (`Execute*`) | Keep a pinned request's cooldown retryable (until #7184 merges). |
+| `sdk/cliproxy/auth/conductor_cooldown.go`, `sdk/cliproxy/auth/quota_signals.go`, `sdk/cliproxy/auth/types.go` | Mark, persist and restore the cooldown a usage limit set (until #7184 merges). |
+| `sdk/api/handlers/handlers_errors.go`, `sdk/api/handlers/openai/openai_responses_websocket_forward.go`, `sdk/api/handlers/claude/code_handlers.go`, `internal/api/server_routes.go`, `internal/client/codex/live/live.go` | Send that usage limit's headers from every error writer, and its WebSocket error event (until #7184 merges). |
 
 Everything else the fork adds lives in files upstream does not have.
 

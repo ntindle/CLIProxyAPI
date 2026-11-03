@@ -64,7 +64,17 @@ require_hook sdk/api/handlers/openai/openai_responses_handlers.go 'responsesSSET
 require_hook sdk/cliproxy/auth/selector.go '.withUsageLimit(usageLimit)'
 require_hook sdk/cliproxy/auth/conductor_selection.go '.withUsageLimit(' 2
 require_hook sdk/cliproxy/auth/scheduler.go '.withUsageLimit(usageLimit)' 2
-require_hook sdk/api/handlers/handlers_errors.go 'WriteSafeErrorHeaders(c.Writer.Header(), msg.Error)'
+require_hook sdk/api/handlers/handlers_errors.go 'WriteSafeErrorHeaders(c.Writer.Header(), msg.Error)' 2
+require_hook sdk/api/handlers/claude/code_handlers.go 'handlers.WriteSafeErrorHeaders(c.Writer.Header(), msg.Error)'
+require_hook internal/api/server_routes.go 'handlers.WriteSafeErrorHeaders(c.Writer.Header(), err)'
+require_hook internal/client/codex/live/live.go 'handlers.WriteSafeErrorHeaders(c.Writer.Header(), err)'
+require_hook sdk/cliproxy/auth/conductor_execution.go 'executeErr = withoutPinnedUsageLimit(executeErr, opts)' 3
+require_hook sdk/cliproxy/auth/conductor_selection.go 'withoutPinnedUsageLimit(unwrapExecutionBoundaryError(errPick), opts)' 3
+require_hook sdk/cliproxy/auth/conductor_cooldown.go 'markCodexUsageLimit(auth, result.Model, result.Error, now)'
+require_hook sdk/cliproxy/auth/conductor_cooldown.go 'restoreUsageLimitMark(' 2
+require_hook sdk/cliproxy/auth/conductor_cooldown.go 'a.UsageLimitResetAt.Equal(b.UsageLimitResetAt)'
+require_hook sdk/cliproxy/auth/quota_signals.go 'q.UsageLimitResetAt,'
+require_hook sdk/cliproxy/auth/types.go 'json:"usage_limit_reset_at,omitempty"'
 require_hook sdk/api/handlers/openai/openai_responses_websocket_forward.go 'coreauth.IsUsageLimitReachedError(errMsg.Error)' 2
 
 echo "== fork tests"
