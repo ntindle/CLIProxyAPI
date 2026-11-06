@@ -260,3 +260,39 @@ func TestForkAccountPoolsFileMembershipAndBillingKind(t *testing.T) {
 		t.Fatal("policy snapshot changed under caller")
 	}
 }
+
+// A pool must evaluate the request's credential track before choosing its tier.
+// A valid outer Codex token remains usable when the nested SIWC token expired.
+func TestForkAccountPoolsPreserveRequestCredentialTrack(t *testing.T) {
+	now := time.Now()
+	a := &Auth{ID: "reviewer", Provider: "codex", Status: StatusActive, Metadata: map[string]any{
+		"type": "codex", "access_token": "synthetic-outer", "expired": now.Add(time.Hour).Format(time.RFC3339), "use_siwc": true,
+		"siwc": map[string]any{"access_token": "synthetic-inner", "expired": now.Add(-time.Hour).Format(time.RFC3339)},
+	}}
+	cfg := poolTestConfig()
+	(*cfg.KeyScopes)[0].Providers = []string{"codex"}
+	pooled := poolTestContext(t, cfg, "review-key")
+	for _, tc := range []struct {
+		name    string
+		ctx     context.Context
+		headers http.Header
+		want    bool
+	}{
+		{"ordinary", pooled, nil, false},
+		{"header", pooled, http.Header{"User-Agent": []string{"codex_cli_rs/0.166.0"}}, true},
+		{"context", context.WithValue(pooled, codexClientRequestContextKey{}, true), nil, true},
+		{"unpooled-header", context.Background(), http.Header{"User-Agent": []string{"codex_cli_rs/0.166.0"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, &FillFirstSelector{}, nil)
+			got, _, err := m.availableAuthsForPoolSelector(tc.ctx, &FillFirstSelector{}, []*Auth{a}, "codex", "gpt-5.4", now, false, tc.headers)
+			if tc.want {
+				if err != nil || len(got) != 1 || got[0].ID != a.ID {
+					t.Fatalf("valid outer track was not selected: %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("ordinary request accepted expired SIWC")
+			}
+		})
+	}
+}

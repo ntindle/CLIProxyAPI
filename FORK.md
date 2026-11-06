@@ -321,3 +321,11 @@ Since v8.0.52 upstream parses and edits JSON with `github.com/MoeForge/moego/ojs
 Fork code uses `ojson` as well. A fork change written against an older base still imports
 `tidwall/*` and fails to build after a sync: switch the import and rename `gjson.`/`sjson.` to
 `ojson.`.
+
+### Upstream v8.0.58 selection boundary
+
+The account-pool selector forwards request context and client headers into upstream's
+request-aware availability checks, including the pass that chooses the first available pool.
+This preserves Codex's outer-token versus SIWC-token selection before pool priority is chosen.
+`TestForkAccountPoolsPreserveRequestCredentialTrack` covers header, context, ordinary, and
+unpooled requests. Keep both pool filtering and this request boundary in future merges.
