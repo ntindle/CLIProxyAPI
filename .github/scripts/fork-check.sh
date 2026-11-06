@@ -38,6 +38,7 @@ require_hook() {
   fi
 }
 require_hook sdk/cliproxy/service_lifecycle.go 's.startQuotaRefresher(ctx)'
+require_hook sdk/cliproxy/service_lifecycle.go 's.startCodexResetCredits(ctx)'
 require_hook sdk/cliproxy/service_lifecycle.go 's.startLiveModelSync(ctx)'
 require_hook sdk/cliproxy/service_models.go 's.withLiveModels(a, provider, models)' 3
 require_hook internal/config/config_v8.go '{"meta", "oauth.providers.meta"}'
