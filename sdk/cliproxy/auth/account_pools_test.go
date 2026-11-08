@@ -296,3 +296,44 @@ func TestForkAccountPoolsPreserveRequestCredentialTrack(t *testing.T) {
 		})
 	}
 }
+
+// The upstream never-rebind path must still honor pool order and refuse a
+// cross-credential retry even when the bound credential is unavailable or tried.
+func TestForkAccountPoolsNeverRebindPreservesBoundCredential(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		name := "single"
+		if mixed {
+			name = "mixed"
+		}
+		t.Run(name, func(t *testing.T) {
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+				Fallback: &FillFirstSelector{}, TTL: time.Hour, RebindOn: SessionAffinityRebindOnNever,
+			})
+			t.Cleanup(selector.Stop)
+			m, _, model := poolTestManager(t, selector)
+			ctx := poolTestContext(t, poolTestConfig(), "review-key")
+			opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"pool-never"}}}
+			pick := func(tried map[string]struct{}) (*Auth, error) {
+				if mixed {
+					a, _, _, err := m.pickNextMixed(ctx, []string{"claude"}, model, opts, tried)
+					return a, err
+				}
+				a, _, err := m.pickNext(ctx, "claude", model, opts, tried)
+				return a, err
+			}
+			a, err := pick(nil)
+			if err != nil || a == nil || a.ID != "reviewer" {
+				t.Fatalf("initial pool binding = %v, %v", a, err)
+			}
+			m.MarkResult(ctx, Result{AuthID: "reviewer", Provider: "claude", Model: model, Success: true, Options: opts})
+			m.MarkResult(ctx, Result{AuthID: "reviewer", Provider: "claude", Model: model, Success: false,
+				Error: &Error{HTTPStatus: http.StatusBadGateway, Message: "502 overloaded"}, Options: opts})
+			for _, tried := range []map[string]struct{}{nil, {"reviewer": {}}, {"reviewer": {}, "shared": {}, "personal": {}}} {
+				a, err = pick(tried)
+				if err == nil || a != nil {
+					t.Fatalf("unavailable binding escaped: auth=%v err=%v", a, err)
+				}
+			}
+		})
+	}
+}
