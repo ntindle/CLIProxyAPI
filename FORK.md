@@ -313,6 +313,8 @@ The fork changes these upstream files, each by a few lines, so these are where c
 | `sdk/cliproxy/auth/quota_signals.go` | Accepts the `X-Meta-*` quota signals. |
 | `sdk/cliproxy/auth/conductor_lifecycle.go` | Keeps the quota observation when a credential file is reloaded. |
 | `sdk/api/handlers/openai/openai_responses_handlers.go` | Passes the subscription usage event after the terminal event. |
+| `internal/runtime/executor/helps/claude_device_profile.go`, `internal/runtime/executor/helps/claude_client_detection.go` | Present Claude Code 2.1.321 while native-client checks keep the 2.1.280 floor ([below](#claude-code-identity-for-fable-52)). |
+| `internal/runtime/executor/claude_executor_cloaking.go`, `internal/runtime/executor/claude_executor_request.go`, `sdk/cliproxy/oauth_probe.go` | The 2.1.321 version string and the Fable 5.2 / Mythos 5.2 handling. |
 
 Everything else the fork adds lives in files upstream does not have.
 
@@ -321,6 +323,23 @@ Since v8.0.52 upstream parses and edits JSON with `github.com/MoeForge/moego/ojs
 Fork code uses `ojson` as well. A fork change written against an older base still imports
 `tidwall/*` and fails to build after a sync: switch the import and rename `gjson.`/`sjson.` to
 `ojson.`.
+
+### Claude Code identity for Fable 5.2
+
+Anthropic refuses `claude-fable-5-2` below Claude Code 2.1.290, and upstream presents 2.1.280
+([router-for-me/CLIProxyAPI#7386](https://github.com/router-for-me/CLIProxyAPI/issues/7386)). Since
+2026-11-09 (`6b4fe24`) the fork presents a native Claude Code 2.1.321 macOS arm64 build instead:
+its User-Agent, `@anthropic-ai/sdk` 0.128.0 and runtime v26.12.1, recorded through a local stub
+server. Native-client detection, the measured helper envelopes and legacy passthrough compare
+against the 2.1.280 floor (`nativeClaudeClientFloorProfile`), so the clients treated as native did
+not change. Fable 5.2 and Mythos 5.2 get `per-turn-control`, as 2.1.321 sends it to them. Fable 5.2
+also gets the preserved-thinking opt-in and progress display. Neither gets the Fable 5.1
+reporting-outcomes block or its `claude-opus-5` fallback. `claude_executor_fable52_test.go` covers
+the model handling.
+
+When an upstream release raises its own baseline, take upstream's identity values, version strings,
+tests and 5.2 handling, and drop ours where upstream's covers the same models. Keep the floor helper
+unless upstream changed native detection itself.
 
 ### Upstream v8.0.58 selection boundary
 
