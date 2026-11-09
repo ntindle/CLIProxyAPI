@@ -696,12 +696,12 @@ Report what actually happened, not what you intended. When you say something is 
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool, keepCallerSystemTopLevel ...bool) []byte {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "", keepAtTopLevel)
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.321", "cli", "", keepAtTopLevel)
 }
 
 func checkSystemInstructionsWithModeDoc(doc *ojson.Doc, strictMode bool, keepCallerSystemTopLevel ...bool) bool {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningModeDoc(doc, strictMode, false, "2.1.280", "cli", "", keepAtTopLevel)
+	return checkSystemInstructionsWithSigningModeDoc(doc, strictMode, false, "2.1.321", "cli", "", keepAtTopLevel)
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -717,6 +717,30 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cch
 func checkSystemInstructionsWithSigningModeDoc(doc *ojson.Doc, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) bool {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
 	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
+}
+
+// isClaudeFable52Model reports Fable 5.2 / Mythos 5.2. Claude Code 2.1.321 sends
+// them per-turn-control like Fable 5.1 and Opus 5.5 (recorded 2026-11-09), but
+// neither the separate reporting-outcomes system block nor a refusal fallback,
+// so the cloak adds neither for them.
+func isClaudeFable52Model(model string) bool {
+	return claudeModelMatchesVersionedFamily(model, "fable-5-2", "fable-5.2", "mythos-5-2", "mythos-5.2")
+}
+
+// claudeModelMatchesVersionedFamily reports whether model contains one of the
+// targets not followed by another digit, so "fable-5-2" does not match "fable-5-20".
+func claudeModelMatchesVersionedFamily(model string, targets ...string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for _, target := range targets {
+		idx := strings.Index(m, target)
+		if idx != -1 {
+			nextIdx := idx + len(target)
+			if nextIdx >= len(m) || m[nextIdx] < '0' || m[nextIdx] > '9' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,

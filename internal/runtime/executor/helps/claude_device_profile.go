@@ -20,14 +20,26 @@ import (
 )
 
 const (
-	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.280 (external, cli)"
-	defaultClaudeFingerprintPackageVersion = "0.112.1"
-	defaultClaudeFingerprintRuntimeVersion = "v26.3.0"
+	// Claude Code 2.1.321 (native macOS arm64 build, recorded 2026-11-09):
+	// Anthropic refuses claude-fable-5-2 below 2.1.290.
+	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.321 (external, cli)"
+	defaultClaudeFingerprintPackageVersion = "0.128.0"
+	defaultClaudeFingerprintRuntimeVersion = "v26.12.1"
 	defaultClaudeFingerprintOS             = "MacOS"
 	defaultClaudeFingerprintArch           = "arm64"
 	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
 	claudeDeviceProfileLockTTL             = 5 * time.Second
 	claudeDeviceProfileCleanupPeriod       = time.Hour
+)
+
+// The native-client floor: the oldest Claude Code release (2.1.280,
+// @anthropic-ai/sdk 0.112.1, v26.3.0) whose request shapes native detection was
+// measured on. Only the outgoing baseline above moved to 2.1.321; detection,
+// the helper envelopes and legacy passthrough keep accepting the same clients.
+const (
+	claudeNativeClientFloorUserAgent      = "claude-cli/2.1.280 (external, cli)"
+	claudeNativeClientFloorPackageVersion = "0.112.1"
+	claudeNativeClientFloorRuntimeVersion = "v26.3.0"
 )
 
 var (
@@ -148,6 +160,29 @@ func defaultClaudeDeviceProfile(cfg *config.Config) ClaudeDeviceProfile {
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
 		profile.version = version
 		profile.hasVersion = true
+	}
+	return profile
+}
+
+// nativeClaudeClientFloorProfile is the software tuple native Claude Code
+// clients are measured against: each configured claude-header-defaults value,
+// otherwise the native-client floor. Outgoing requests use
+// defaultClaudeDeviceProfile instead.
+func nativeClaudeClientFloorProfile(cfg *config.Config) ClaudeDeviceProfile {
+	profile := defaultClaudeDeviceProfile(cfg)
+	var hd config.ClaudeHeaderDefaults
+	if cfg != nil {
+		hd = cfg.ClaudeHeaderDefaults
+	}
+	if strings.TrimSpace(hd.UserAgent) == "" {
+		profile.UserAgent = claudeNativeClientFloorUserAgent
+		profile.version, profile.hasVersion = parseClaudeCLIVersion(profile.UserAgent)
+	}
+	if strings.TrimSpace(hd.PackageVersion) == "" {
+		profile.PackageVersion = claudeNativeClientFloorPackageVersion
+	}
+	if strings.TrimSpace(hd.RuntimeVersion) == "" {
+		profile.RuntimeVersion = claudeNativeClientFloorRuntimeVersion
 	}
 	return profile
 }
@@ -650,14 +685,14 @@ func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfil
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
 }
 
-// DefaultClaudeVersion returns the version string (e.g. "2.1.280") from the
+// DefaultClaudeVersion returns the version string (e.g. "2.1.321") from the
 // current baseline device profile. It extracts the version from the User-Agent.
 func DefaultClaudeVersion(cfg *config.Config) string {
 	profile := defaultClaudeDeviceProfile(cfg)
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
 	}
-	return "2.1.280"
+	return "2.1.321"
 }
 
 func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config) {
@@ -682,17 +717,20 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	}
 
 	if confirmedClaudeCode {
+		// A native client keeps its own tuple from the floor up, so a 2.1.316
+		// client is not sent out with 2.1.321's package and runtime versions.
+		floor := nativeClaudeClientFloorProfile(cfg)
 		validRuntime := func(value string) bool {
 			if !allowNewer && cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion) != "" {
 				return value == profile.RuntimeVersion
 			}
-			return plausibleClaudeRuntimeVersion(value, profile.RuntimeVersion)
+			return plausibleClaudeRuntimeVersion(value, floor.RuntimeVersion)
 		}
 		validPackage := func(value string) bool {
 			if !allowNewer && cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion) != "" {
 				return value == profile.PackageVersion
 			}
-			return plausibleClaudePackageVersion(value, profile.PackageVersion)
+			return plausibleClaudePackageVersion(value, floor.PackageVersion)
 		}
 		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, validRuntime)
 		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, validPackage)

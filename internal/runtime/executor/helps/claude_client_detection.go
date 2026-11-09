@@ -257,7 +257,7 @@ func matchesMeasuredClaudeCodeHaiku55HelperProfile(
 }
 
 func measuredClaudeCodeHaiku55HelperHeadersMatch(headers http.Header, cfg *config.Config) bool {
-	profile := defaultClaudeDeviceProfile(cfg)
+	profile := nativeClaudeClientFloorProfile(cfg)
 	expected := map[string]string{
 		"Accept":                  "application/json",
 		"Content-Type":            "application/json",
@@ -428,7 +428,7 @@ func normalizedClaudeBetaHeader(headers http.Header) string {
 // exact beta allowlist, the body shape, the billing CCH and the session binding -
 // stay strict.
 func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Config, shape claudeCodeHelperShape) bool {
-	profile := defaultClaudeDeviceProfile(cfg)
+	profile := nativeClaudeClientFloorProfile(cfg)
 	expected := map[string]string{
 		"Accept":                  "application/json",
 		"Content-Type":            "application/json",
@@ -691,9 +691,9 @@ func plausibleClaudeCodeUserAgent(userAgent string, cfg *config.Config) bool {
 }
 
 func plausibleClaudeCodeVersion(candidate claudeCLIVersion, cfg *config.Config) bool {
-	baseline, okBaseline := parseClaudeCLIVersion(defaultClaudeDeviceProfile(cfg).UserAgent)
-	// Patch releases (>= baseline.patch) within the release line preserve native passthrough.
-	return okBaseline && plausibleClaudeCLIVersion(candidate, baseline)
+	floor := nativeClaudeClientFloorProfile(cfg)
+	// Patch releases (>= floor.patch) within the release line preserve native passthrough.
+	return floor.hasVersion && plausibleClaudeCLIVersion(candidate, floor.version)
 }
 
 func parseClaudeCodeUserAgentDetails(userAgent string) (entrypoint, agentSDKVersion string) {

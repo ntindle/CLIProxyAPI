@@ -331,13 +331,20 @@ func isClaudeFable51OnlyModel(model string) bool {
 	return false
 }
 
+// isClaudeFable52OnlyModel reports Fable 5.2 specifically. It binds signed
+// thinking blocks as Fable 5.1 does; Mythos 5.2 stays out of the check, as
+// Mythos 5.1 does, until a capture shows otherwise.
+func isClaudeFable52OnlyModel(model string) bool {
+	return claudeModelMatchesVersionedFamily(claudeCanonicalModel(model), "fable-5-2", "fable-5.2")
+}
+
 // isClaudePreservedThinkingModel reports the models whose signed thinking
 // blocks Anthropic binds to the creation-time conversation prefix (system,
 // tools, and every earlier message). Replaying those blocks under a reshaped
 // prefix fails binding validation unless the request opts into dropping them.
 // See https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
 func isClaudePreservedThinkingModel(model string) bool {
-	return isClaudeOpus55Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model) || isClaudeFable51OnlyModel(model)
+	return isClaudeOpus55Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model) || isClaudeFable51OnlyModel(model) || isClaudeFable52OnlyModel(model)
 }
 
 // claudeThinkingTypeAcceptsBlockBinding reports whether the body's thinking
@@ -432,10 +439,11 @@ func applyClaudePreservedThinkingBindingDoc(doc *ojson.Doc) bool {
 	return doc.Set("thinking.block_binding.prefix_mismatch_behavior", "drop_block") == nil
 }
 
-// claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models that
-// send thinking.display=updates unless the caller already chose a display mode.
+// claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models,
+// plus Fable/Mythos 5.2, that send thinking.display=updates unless the caller
+// already chose a display mode.
 func claudeModelUsesProgressDisplay(model string) bool {
-	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
+	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeFable52Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
 }
 
 // applyClaudeCloakThinkingDisplay fills the latest CLI display only when the
@@ -467,8 +475,10 @@ func applyClaudeCloakThinkingDisplayDoc(doc *ojson.Doc, callerOwned bool) bool {
 	return doc.Set("thinking.display", "updates") == nil
 }
 
+// Claude Code 2.1.321 sends per-turn-control for Fable 5.2 and Mythos 5.2 as
+// well (recorded 2026-11-09); Mythos 5.1 still goes without it.
 func claudeModelHasPerTurnEffort(model string) bool {
-	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
+	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1") || isClaudeFable52Model(model)
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
@@ -1456,7 +1466,7 @@ func applyClaudeHeadersWithNativeProfile(
 	identityHeader("Anthropic-Version", "2023-06-01")
 	identityHeader("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	identityHeader("X-App", "cli")
-	// Values below match Claude Code 2.1.280 / @anthropic-ai/sdk 0.112.1.
+	// Values below match Claude Code 2.1.321 / @anthropic-ai/sdk 0.128.0.
 	identityHeader("X-Stainless-Retry-Count", "0")
 	identityHeader("X-Stainless-Runtime", "node")
 	identityHeader("X-Stainless-Lang", "js")

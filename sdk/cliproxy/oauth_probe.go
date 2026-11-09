@@ -21,7 +21,7 @@ const (
 	// oauthProbeMaxBody caps how much of a probe response is read.
 	oauthProbeMaxBody = 8 << 20
 
-	claudeProbeUserAgent  = "claude-cli/2.1.280 (external, cli)"
+	claudeProbeUserAgent  = "claude-cli/2.1.321 (external, cli)"
 	claudeProbeOAuthBeta  = "oauth-2025-04-20"
 	claudeProbeAPIVersion = "2023-06-01"
 	codexProbeUserAgent   = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"

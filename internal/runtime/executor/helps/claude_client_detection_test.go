@@ -25,7 +25,7 @@ func confirmedClaudeCodeHeaders() http.Header {
 }
 
 func measuredClaudeCodeHelperHeaders(betaProfile string) http.Header {
-	profile := defaultClaudeDeviceProfile(&config.Config{})
+	profile := nativeClaudeClientFloorProfile(&config.Config{})
 	headers := http.Header{
 		"Accept":            {"application/json"},
 		"Accept-Encoding":   {"gzip, deflate, br, zstd"},
