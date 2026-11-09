@@ -6,14 +6,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -41,8 +45,9 @@ func (s *Server) registerMuseCodeRoutes() {
 }
 
 // museCodeRelay forwards one Muse Code client request to Meta with a Meta
-// credential and returns the answer unchanged. These payloads are already in
-// Meta's format and must not pass through a protocol translator.
+// credential and returns the answer unchanged, except that the model catalog
+// hides the models an OAuth model alias has taken over. These payloads are
+// already in Meta's format and must not pass through a protocol translator.
 func (s *Server) museCodeRelay(c *gin.Context) {
 	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta auth manager unavailable"})
@@ -86,7 +91,17 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errURL.Error()})
 		return
 	}
-	req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, selected, c.Request.Method, upstreamURL, body, museCodeRelayHeaders(c.Request.Header))
+	headers := museCodeRelayHeaders(c.Request.Header)
+	var shadowed map[string]string
+	if c.Request.Method == http.MethodGet && strings.TrimSuffix(c.Request.URL.Path, "/") == "/muse-code/models" {
+		shadowed = museCodeShadowedModels(s.getConfig(), selected)
+	}
+	if len(shadowed) > 0 {
+		// The catalog sent back can differ from Meta's, so Meta must not answer
+		// 304 for a list this client was never given.
+		headers.Del("If-None-Match")
+	}
+	req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, selected, c.Request.Method, upstreamURL, body, headers)
 	if errRequest != nil {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), gin.H{"error": errRequest.Error()})
 		return
@@ -106,13 +121,88 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadGateway), gin.H{"error": "Failed to read Muse Code response"})
 		return
 	}
-	for _, name := range []string{"Content-Type", "Cache-Control", "Etag", "Last-Modified"} {
+	relayedHeaders := []string{"Content-Type", "Cache-Control", "Etag", "Last-Modified"}
+	if len(shadowed) > 0 && resp.StatusCode == http.StatusOK {
+		if hidden, changed := hideShadowedMuseCodeModels(upstreamBody, shadowed); changed {
+			upstreamBody = hidden
+			// Meta's validators describe Meta's list, not this one.
+			relayedHeaders = relayedHeaders[:2]
+		}
+	}
+	for _, name := range relayedHeaders {
 		if value := resp.Header.Get(name); value != "" {
 			c.Header(name, value)
 		}
 	}
 	c.Status(resp.StatusCode)
 	_, _ = c.Writer.Write(upstreamBody)
+}
+
+// museCodeShadowedModels maps each model ID an OAuth model alias on the
+// credential's channel has taken over to the upstream model the alias runs
+// instead: a request for that ID never reaches the model of that name. The
+// credential's own aliases come first, as they do when a request runs.
+func museCodeShadowedModels(cfg *config.Config, selected *auth.Auth) map[string]string {
+	if selected == nil {
+		return nil
+	}
+	channel := auth.OAuthModelAliasChannel(selected.Provider, selected.AuthKind())
+	if channel == "" {
+		return nil
+	}
+	aliases := auth.OAuthModelAliasesFromAttributes(selected.Attributes)
+	if cfg != nil {
+		for rawChannel, entries := range cfg.OAuthModelAlias {
+			if strings.EqualFold(strings.TrimSpace(rawChannel), channel) {
+				aliases = append(aliases, entries...)
+			}
+		}
+	}
+	shadowed := make(map[string]string, len(aliases))
+	for _, entry := range aliases {
+		name, alias := strings.TrimSpace(entry.Name), strings.TrimSpace(entry.Alias)
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			continue
+		}
+		if _, exists := shadowed[strings.ToLower(alias)]; !exists {
+			shadowed[strings.ToLower(alias)] = name
+		}
+	}
+	return shadowed
+}
+
+// hideShadowedMuseCodeModels marks a catalog entry hidden when an alias has
+// taken over its ID and the model the alias runs is in the same catalog, so a
+// model picker offers only what a request would reach. Muse still resolves a
+// hidden model named explicitly, and the alias then runs it. The body comes
+// back unchanged when nothing is hidden or it is not a catalog this reads.
+func hideShadowedMuseCodeModels(body []byte, shadowed map[string]string) ([]byte, bool) {
+	data := gjson.GetBytes(body, "data")
+	if len(shadowed) == 0 || !data.IsArray() {
+		return body, false
+	}
+	entries := data.Array()
+	listed := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		listed[strings.ToLower(strings.TrimSpace(entry.Get("id").String()))] = true
+	}
+	out, changed := body, false
+	for i, entry := range entries {
+		target, ok := shadowed[strings.ToLower(strings.TrimSpace(entry.Get("id").String()))]
+		if !ok || !listed[strings.ToLower(target)] {
+			continue
+		}
+		museCode := entry.Get("metadata.muse-code")
+		if !museCode.IsObject() || museCode.Get("is_hidden").Bool() {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(out, "data."+strconv.Itoa(i)+".metadata.muse-code.is_hidden", true)
+		if errSet != nil {
+			return body, false
+		}
+		out, changed = updated, true
+	}
+	return out, changed
 }
 
 // MuseCodeURL returns the address of a Muse Code endpoint, such as
