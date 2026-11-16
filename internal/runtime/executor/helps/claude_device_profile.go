@@ -4,24 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 const (
-	// Claude Code 2.1.321 (native macOS arm64 build, recorded 2026-11-09):
-	// Anthropic refuses claude-fable-5-2 below 2.1.290.
 	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.321 (external, cli)"
 	defaultClaudeFingerprintPackageVersion = "0.128.0"
 	defaultClaudeFingerprintRuntimeVersion = "v26.12.1"

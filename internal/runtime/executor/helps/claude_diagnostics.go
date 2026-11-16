@@ -6,13 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
@@ -794,6 +794,12 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 // which in native Claude Code do not emit cc_prompt_id or cc_prev_req.
 func IsClaudeProbeOrHelperRequest(body []byte) bool {
 	return isClaudeProbeRequest(body) || isClaudeTitleHelperRequest(body)
+}
+
+// IsClaudeQuotaProbeRequest reports the max_tokens=1 quota probe alone,
+// excluding the session-title helper that IsClaudeProbeOrHelperRequest also covers.
+func IsClaudeQuotaProbeRequest(body []byte) bool {
+	return isClaudeProbeRequest(body)
 }
 
 // IsClaudeSubagentRequest reports whether the incoming request originates from
