@@ -222,10 +222,29 @@ func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
 
-// SchedulerWantsAcrossPriorities reports whether the active scheduler opted into receiving
+// SchedulerWantsAcrossPriorities reports whether any active scheduler opted into receiving
 // candidates across all priority tiers.
 func (h *Host) SchedulerWantsAcrossPriorities() bool {
 	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
+}
+
+// SchedulerWantsAllPriorityCandidates reports whether PickAuth needs candidates across all
+// priority tiers, including when multiple active schedulers may chain across excluded tiers.
+func (h *Host) SchedulerWantsAllPriorityCandidates() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsAllPriorityCandidates()
+}
+
+// HasSchedulerContinuity reports whether the active scheduler supports bounded continuity evaluation.
+func (h *Host) HasSchedulerContinuity() bool {
+	return h != nil && h.inner != nil && h.inner.HasSchedulerContinuity()
+}
+
+// EvaluateSchedulerContinuity invokes the active scheduler plugin's Continuity callback.
+func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	if h == nil || h.inner == nil {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	return h.inner.EvaluateSchedulerContinuity(ctx, req)
 }
 
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.

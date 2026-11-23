@@ -71,6 +71,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
 	doc := ojson.NewDoc(body)
+	if shouldPreserveFullCodexOpenAIInclude(ctx, auth, baseURL, opts.Headers) {
+		originalTranslated = helps.PreserveCodexOpenAIResponsesInclude(originalTranslated, originalPayload, from)
+		helps.PreserveCodexOpenAIResponsesIncludeDoc(doc, req.Payload, from)
+	}
 	normalizeCodexOutputBudgetDoc(doc)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 
@@ -122,10 +126,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, "codex executor", doc, isCompat, targetModel, baseURL)
 
+	sessionInstructions, errSession := helps.PrepareCodexSessionInstructions(ctx, doc, req, opts, nil, nil, codexCompactionSummaryFromContext(ctx))
+	if errSession != nil {
+		return nil, errSession
+	}
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
 	if err != nil {
 		return nil, err
+	}
+	if errFinal := sessionInstructions.CheckFinal(upstreamBody); errFinal != nil {
+		return nil, errFinal
 	}
 	body = upstreamBody
 	upstreamModel := strings.TrimSpace(doc.Get("model").String())
@@ -153,7 +164,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      upstreamBody,
+		Body:      sessionInstructions.LogBody(upstreamBody),
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -291,7 +302,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 							// transparently retry on another credential, and report the status the
 							// upstream refused to put on the wire.
 							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
-							return nil, newCodexBootstrapOverloadErr(terminalBody)
+							if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
+								return nil, streamErr
+							}
+							return nil, newCodexBootstrapOverloadErrWithRetryAfter(terminalBody, streamErr.RetryAfter())
 						}
 						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}

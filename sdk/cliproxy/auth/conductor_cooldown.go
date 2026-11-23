@@ -459,6 +459,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 				mergedQuota.cooldownSignals = prevQuota.cooldownSignals
 			}
 		}
+		if mergedQuota.Exceeded && !mergedQuota.NextRecoverAt.IsZero() && !mergedQuota.NextRecoverAt.After(now) {
+			mergedQuota = QuotaState{}
+		}
 		applyCooldownFields(&auth.Quota, mergedQuota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, prevQuota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
@@ -472,8 +475,32 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		if authForce.After(now) && authForce.After(auth.forceCooldownUntil) {
 			auth.forceCooldownUntil = authForce
 		}
+		if record.QuotaForceCooldownUntil.After(now) && record.QuotaForceCooldownUntil.After(auth.quotaForceCooldownUntil) {
+			auth.quotaForceCooldownUntil = record.QuotaForceCooldownUntil
+		}
 		if record.CredentialRetryAfter.After(now) && record.CredentialRetryAfter.After(auth.credentialRetryAfter) {
 			auth.credentialRetryAfter = record.CredentialRetryAfter
+		}
+		recordNonAuthRetry := record.NonAuthCredentialRetryAfter
+		if !record.NonAuthCredentialRetryEvaluated && recordNonAuthRetry.IsZero() && record.CredentialRetryAfter.After(now) && !isRefreshClearableCredentialError(record.LastError) {
+			recordNonAuthRetry = record.CredentialRetryAfter
+		}
+		recordNonAuthErr := record.NonAuthCredentialLastError
+		if recordNonAuthErr == nil && !isRefreshClearableCredentialError(record.LastError) {
+			recordNonAuthErr = record.LastError
+		}
+		if recordNonAuthRetry.After(now) {
+			if recordNonAuthRetry.After(auth.nonAuthCredentialRetryAfter) {
+				auth.nonAuthCredentialRetryAfter = recordNonAuthRetry
+				if recordNonAuthErr != nil {
+					auth.nonAuthCredentialLastError = cloneError(recordNonAuthErr)
+				}
+			} else if auth.nonAuthCredentialLastError == nil && recordNonAuthErr != nil {
+				auth.nonAuthCredentialLastError = cloneError(recordNonAuthErr)
+			}
+		}
+		if record.NonQuotaCooldownUntil.After(now) && record.NonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
+			auth.nonQuotaCooldownUntil = record.NonQuotaCooldownUntil
 		}
 		auth.forceCooldownSeeded = true
 		auth.Generation++
@@ -522,16 +549,26 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	} else if isWrappedRecord && outerForceUntil.After(now) && outerForceUntil.After(auth.credQuotaForceUntil) {
 		auth.credQuotaForceUntil = outerForceUntil
 	}
+	var recordQuotaForceUntil time.Time
+	if !isWrappedRecord && record.QuotaForceCooldownUntil.After(now) {
+		recordQuotaForceUntil = record.QuotaForceCooldownUntil
+	}
+	var recordNonQuotaUntil time.Time
+	if record.NonQuotaCooldownUntil.After(now) {
+		recordNonQuotaUntil = record.NonQuotaCooldownUntil
+	}
 	mergeModelState(state, &ModelState{
-		Unavailable:         true,
-		Status:              StatusError,
-		StatusMessage:       reason,
-		NextRetryAfter:      record.NextRetryAfter,
-		Quota:               quota,
-		LastError:           cloneError(record.LastError),
-		UpdatedAt:           updatedAt,
-		forceCooldownUntil:  recordModelForceUntil,
-		forceCooldownSeeded: true,
+		Unavailable:             true,
+		Status:                  StatusError,
+		StatusMessage:           reason,
+		NextRetryAfter:          record.NextRetryAfter,
+		Quota:                   quota,
+		LastError:               cloneError(record.LastError),
+		UpdatedAt:               updatedAt,
+		forceCooldownUntil:      recordModelForceUntil,
+		quotaForceCooldownUntil: recordQuotaForceUntil,
+		nonQuotaCooldownUntil:   recordNonQuotaUntil,
+		forceCooldownSeeded:     true,
 	})
 	// The persisted independent layer joins the merge newest-wins; a newer
 	// live independent layer (shadow or freshly captured unwrapped state,
@@ -545,15 +582,17 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		// presenting the propagated credential quota.
 		if !isDevinQuotaExhaustionMessage(devinRecordErrorText(record)) {
 			recordShadow := &ModelState{
-				Unavailable:         true,
-				Status:              StatusError,
-				StatusMessage:       reason,
-				NextRetryAfter:      record.NextRetryAfter,
-				Quota:               quota,
-				LastError:           cloneError(record.LastError),
-				UpdatedAt:           updatedAt,
-				forceCooldownUntil:  recordModelForceUntil,
-				forceCooldownSeeded: true,
+				Unavailable:             true,
+				Status:                  StatusError,
+				StatusMessage:           reason,
+				NextRetryAfter:          record.NextRetryAfter,
+				Quota:                   quota,
+				LastError:               cloneError(record.LastError),
+				UpdatedAt:               updatedAt,
+				forceCooldownUntil:      recordModelForceUntil,
+				quotaForceCooldownUntil: recordQuotaForceUntil,
+				nonQuotaCooldownUntil:   recordNonQuotaUntil,
+				forceCooldownSeeded:     true,
 			}
 			preferred := state.credentialQuotaShadow.cloneShallow()
 			if liveShadow != nil {
@@ -586,6 +625,12 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			restoredShadow.Quota.cooldownEvaluated = restoredShadow.Quota.Exceeded
 			if indepForceUntil.After(restoredShadow.forceCooldownUntil) {
 				restoredShadow.forceCooldownUntil = indepForceUntil
+			}
+			if record.IndependentQuotaForceCooldownUntil.After(now) && record.IndependentQuotaForceCooldownUntil.After(restoredShadow.quotaForceCooldownUntil) {
+				restoredShadow.quotaForceCooldownUntil = record.IndependentQuotaForceCooldownUntil
+			}
+			if record.IndependentNonQuotaCooldownUntil.After(now) && record.IndependentNonQuotaCooldownUntil.After(restoredShadow.nonQuotaCooldownUntil) {
+				restoredShadow.nonQuotaCooldownUntil = record.IndependentNonQuotaCooldownUntil
 			}
 			restoredShadow.forceCooldownSeeded = true
 			if executorKeyFromAuth(auth) == "claude" || strings.EqualFold(strings.TrimSpace(record.Provider), "claude") {
@@ -828,8 +873,10 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 				auth.forceCooldownUntil = time.Time{}
 				changed = true
 			}
-			if !auth.credentialRetryAfter.IsZero() {
+			if !auth.credentialRetryAfter.IsZero() || !auth.nonAuthCredentialRetryAfter.IsZero() {
 				auth.credentialRetryAfter = time.Time{}
+				auth.nonAuthCredentialRetryAfter = time.Time{}
+				auth.nonAuthCredentialLastError = nil
 				changed = true
 			}
 			if keepCredQuotaForce {
@@ -942,6 +989,8 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			applyCooldownFields(&state.Quota, QuotaState{})
 			state.cooldownRecordedSeq = 0
 			state.forceCooldownUntil = time.Time{}
+			state.quotaForceCooldownUntil = time.Time{}
+			state.nonQuotaCooldownUntil = time.Time{}
 			state.credentialQuotaShadow = nil
 			state.credentialQuotaPropagated = false
 			state.UpdatedAt = now
@@ -954,10 +1003,16 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	}
 	if !keepAuthLevelForce {
 		auth.forceCooldownUntil = time.Time{}
+		auth.quotaForceCooldownUntil = time.Time{}
 	}
-	if !auth.credentialRetryAfter.IsZero() {
+	if !auth.credentialRetryAfter.IsZero() || !auth.nonAuthCredentialRetryAfter.IsZero() {
 		auth.credentialRetryAfter = time.Time{}
+		auth.nonAuthCredentialRetryAfter = time.Time{}
+		auth.nonAuthCredentialLastError = nil
 		changed = true
+	}
+	if !keepAuthLevelForce && !auth.nonQuotaCooldownUntil.IsZero() {
+		auth.nonQuotaCooldownUntil = time.Time{}
 	}
 
 	prevUnavailable := auth.Unavailable
@@ -998,12 +1053,24 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if hasUnauthorizedAuthFailure(auth) {
 		return false
 	}
+	isDisabled := auth.Disabled || auth.Status == StatusDisabled
 	changed := false
 	auth.forceCooldownUntil = time.Time{}
+	auth.quotaForceCooldownUntil = time.Time{}
 	auth.credQuotaForceUntil = time.Time{}
 	auth.credentialRetryAfter = time.Time{}
+	auth.nonAuthCredentialRetryAfter = time.Time{}
+	auth.nonAuthCredentialLastError = nil
+	auth.nonQuotaCooldownUntil = time.Time{}
 	auth.cooldownRecordedSeq = 0
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+	if isDisabled {
+		if !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+			auth.NextRetryAfter = time.Time{}
+			applyCooldownFields(&auth.Quota, QuotaState{})
+			auth.UpdatedAt = now
+			changed = true
+		}
+	} else if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		applyCooldownFields(&auth.Quota, QuotaState{})
@@ -1015,8 +1082,19 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			continue
 		}
 		state.forceCooldownUntil = time.Time{}
+		state.quotaForceCooldownUntil = time.Time{}
+		state.nonQuotaCooldownUntil = time.Time{}
 		state.cooldownRecordedSeq = 0
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
+		if state.Status == StatusDisabled {
+			if !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
+				state.NextRetryAfter = time.Time{}
+				applyCooldownFields(&state.Quota, QuotaState{})
+				state.credentialQuotaShadow = nil
+				state.credentialQuotaPropagated = false
+				state.UpdatedAt = now
+				changed = true
+			}
+		} else if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
 			applyCooldownFields(&state.Quota, QuotaState{})
@@ -1281,7 +1359,10 @@ func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
 		!a.ForceCooldownUntil.Equal(b.ForceCooldownUntil) ||
 		!a.CredQuotaForceCooldownUntil.Equal(b.CredQuotaForceCooldownUntil) ||
 		!a.IndependentForceCooldownUntil.Equal(b.IndependentForceCooldownUntil) ||
-		!a.CredentialRetryAfter.Equal(b.CredentialRetryAfter) {
+		!a.CredentialRetryAfter.Equal(b.CredentialRetryAfter) ||
+		a.NonAuthCredentialRetryEvaluated != b.NonAuthCredentialRetryEvaluated ||
+		!a.NonAuthCredentialRetryAfter.Equal(b.NonAuthCredentialRetryAfter) ||
+		!cooldownErrorEqual(a.NonAuthCredentialLastError, b.NonAuthCredentialLastError) {
 		return false
 	}
 	if !maps.Equal(a.CooldownSignals, b.CooldownSignals) || !maps.Equal(a.IndependentCooldownSignals, b.IndependentCooldownSignals) {
@@ -1322,16 +1403,39 @@ func cooldownErrorEqual(a, b *Error) bool {
 }
 
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
-	if auth == nil || !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+	if auth == nil || !auth.Unavailable {
 		return CooldownStateRecord{}, false
-	}
-	var cooldownSignals map[string]string
-	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) && !auth.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
-		cooldownSignals = sanitizePersistedClaudeCooldownSignals(auth.Quota.cooldownSignals)
 	}
 	var authForceUntil time.Time
 	if u := effectiveAuthForceUntil(auth); u.After(now) {
 		authForceUntil = u
+	}
+	var credentialRetryAfter time.Time
+	if !auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) {
+		credentialRetryAfter = auth.credentialRetryAfter
+	}
+	var nonAuthCredentialRetryAfter time.Time
+	var nonAuthCredentialLastError *Error
+	if !auth.nonAuthCredentialRetryAfter.IsZero() && auth.nonAuthCredentialRetryAfter.After(now) {
+		nonAuthCredentialRetryAfter = auth.nonAuthCredentialRetryAfter
+		nonAuthCredentialLastError = cloneError(auth.nonAuthCredentialLastError)
+	}
+	effectiveNextRetry := auth.NextRetryAfter
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(effectiveNextRetry) {
+		effectiveNextRetry = auth.Quota.NextRecoverAt
+	}
+	if authForceUntil.After(effectiveNextRetry) {
+		effectiveNextRetry = authForceUntil
+	}
+	if credentialRetryAfter.After(effectiveNextRetry) {
+		effectiveNextRetry = credentialRetryAfter
+	}
+	if effectiveNextRetry.IsZero() || !effectiveNextRetry.After(now) {
+		return CooldownStateRecord{}, false
+	}
+	var cooldownSignals map[string]string
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) && !effectiveNextRetry.After(auth.Quota.NextRecoverAt) {
+		cooldownSignals = sanitizePersistedClaudeCooldownSignals(auth.Quota.cooldownSignals)
 	}
 	var credQuotaForceUntil time.Time
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
@@ -1339,25 +1443,34 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 			credQuotaForceUntil = u
 		}
 	}
-	var credentialRetryAfter time.Time
-	if !auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) {
-		credentialRetryAfter = auth.credentialRetryAfter
+	var authQuotaForceUntil time.Time
+	if auth.quotaForceCooldownUntil.After(now) {
+		authQuotaForceUntil = auth.quotaForceCooldownUntil
+	}
+	var nonQuotaUntil time.Time
+	if auth.nonQuotaCooldownUntil.After(now) {
+		nonQuotaUntil = auth.nonQuotaCooldownUntil
 	}
 	return CooldownStateRecord{
-		Provider:                    strings.TrimSpace(auth.Provider),
-		AuthID:                      auth.ID,
-		AuthFile:                    cooldownAuthFile(auth),
-		Status:                      "cooling",
-		NextRetryAfter:              auth.NextRetryAfter,
-		Reason:                      cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
-		Quota:                       cooldownFieldsOf(auth.Quota),
-		LastError:                   cloneError(auth.LastError),
-		UpdatedAt:                   auth.UpdatedAt,
-		CooldownSignals:             cooldownSignals,
-		ForceCooldownUntil:          authForceUntil,
-		CredQuotaForceCooldownUntil: credQuotaForceUntil,
-		ForceCooldownEvaluated:      true,
-		CredentialRetryAfter:        credentialRetryAfter,
+		Provider:                        strings.TrimSpace(auth.Provider),
+		AuthID:                          auth.ID,
+		AuthFile:                        cooldownAuthFile(auth),
+		Status:                          "cooling",
+		NextRetryAfter:                  effectiveNextRetry,
+		Reason:                          cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
+		Quota:                           cooldownFieldsOf(auth.Quota),
+		LastError:                       cloneError(auth.LastError),
+		UpdatedAt:                       auth.UpdatedAt,
+		CooldownSignals:                 cooldownSignals,
+		ForceCooldownUntil:              authForceUntil,
+		QuotaForceCooldownUntil:         authQuotaForceUntil,
+		CredQuotaForceCooldownUntil:     credQuotaForceUntil,
+		ForceCooldownEvaluated:          true,
+		CredentialRetryAfter:            credentialRetryAfter,
+		NonAuthCredentialRetryAfter:     nonAuthCredentialRetryAfter,
+		NonAuthCredentialLastError:      nonAuthCredentialLastError,
+		NonAuthCredentialRetryEvaluated: true,
+		NonQuotaCooldownUntil:           nonQuotaUntil,
 	}, true
 }
 
@@ -1381,25 +1494,41 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 	} else if u := effectiveModelForceUntil(state); u.After(now) {
 		outerForceUntil = u
 	}
+	var modelQuotaForceUntil time.Time
+	if !liveCredentialWrap && state.quotaForceCooldownUntil.After(now) {
+		modelQuotaForceUntil = state.quotaForceCooldownUntil
+	}
+	var modelNonQuotaUntil time.Time
+	if state.nonQuotaCooldownUntil.After(now) {
+		modelNonQuotaUntil = state.nonQuotaCooldownUntil
+	}
 	record := CooldownStateRecord{
-		Provider:               strings.TrimSpace(auth.Provider),
-		AuthID:                 auth.ID,
-		AuthFile:               cooldownAuthFile(auth),
-		Model:                  model,
-		Status:                 "cooling",
-		NextRetryAfter:         state.NextRetryAfter,
-		Reason:                 cooldownReason(state.StatusMessage, state.Quota, state.LastError),
-		Quota:                  cooldownFieldsOf(state.Quota),
-		LastError:              cloneError(state.LastError),
-		UpdatedAt:              state.UpdatedAt,
-		CooldownSignals:        cooldownSignals,
-		ForceCooldownUntil:     outerForceUntil,
-		ForceCooldownEvaluated: true,
+		Provider:                strings.TrimSpace(auth.Provider),
+		AuthID:                  auth.ID,
+		AuthFile:                cooldownAuthFile(auth),
+		Model:                   model,
+		Status:                  "cooling",
+		NextRetryAfter:          state.NextRetryAfter,
+		Reason:                  cooldownReason(state.StatusMessage, state.Quota, state.LastError),
+		Quota:                   cooldownFieldsOf(state.Quota),
+		LastError:               cloneError(state.LastError),
+		UpdatedAt:               state.UpdatedAt,
+		CooldownSignals:         cooldownSignals,
+		ForceCooldownUntil:      outerForceUntil,
+		QuotaForceCooldownUntil: modelQuotaForceUntil,
+		ForceCooldownEvaluated:  true,
+		NonQuotaCooldownUntil:   modelNonQuotaUntil,
 	}
 	if state.credentialQuotaShadow != nil {
 		record.IndependentState = state.credentialQuotaShadow.cloneShallow()
 		if u := effectiveModelForceUntil(state.credentialQuotaShadow); u.After(now) {
 			record.IndependentForceCooldownUntil = u
+		}
+		if state.credentialQuotaShadow.quotaForceCooldownUntil.After(now) {
+			record.IndependentQuotaForceCooldownUntil = state.credentialQuotaShadow.quotaForceCooldownUntil
+		}
+		if state.credentialQuotaShadow.nonQuotaCooldownUntil.After(now) {
+			record.IndependentNonQuotaCooldownUntil = state.credentialQuotaShadow.nonQuotaCooldownUntil
 		}
 		if state.credentialQuotaShadow.Quota.Exceeded && state.credentialQuotaShadow.Quota.NextRecoverAt.After(now) &&
 			!state.credentialQuotaShadow.NextRetryAfter.After(state.credentialQuotaShadow.Quota.NextRecoverAt) {
@@ -1464,6 +1593,22 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 	if staleEpoch {
 		return true
 	}
+	staleVersion := result.CredentialVersion < current.CredentialVersion && (result.CredentialVersion > 0 || current.CredentialVersion > 1)
+	if staleVersion && result.Error != nil &&
+		(strings.EqualFold(strings.TrimSpace(result.Provider), "antigravity") || strings.EqualFold(strings.TrimSpace(current.Provider), "antigravity")) &&
+		isAntigravityValidationRequiredError(result.Error) {
+		// An Antigravity account validation challenge applies to the account, so a
+		// plain OAuth access-token refresh (same credential, identical refresh token)
+		// must not discard the signal. Conversely, a stale-version validation result
+		// must only be accepted when both refresh tokens are non-empty and equal, so
+		// replacing refresh_token (even if access_token temporarily matches or is
+		// empty) never carries an old account's challenge onto the new credential.
+		refreshNow := authRefreshToken(current)
+		if refreshNow != "" && result.RefreshToken != "" && refreshNow == result.RefreshToken {
+			return false
+		}
+		return true
+	}
 	if result.AccessToken != "" && authMatchesTokenPartition(current, result.AccessToken) {
 		return false
 	}
@@ -1484,7 +1629,6 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 			return false
 		}
 	}
-	staleVersion := result.CredentialVersion < current.CredentialVersion && (result.CredentialVersion > 0 || current.CredentialVersion > 1)
 	return staleVersion
 }
 
@@ -1580,12 +1724,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			!auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) &&
 			auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
+		isDisabled := auth.Disabled || auth.Status == StatusDisabled
 		if result.Success {
-			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
+			if result.CompletedResponse && !result.SkipQuotaObservation && !isDisabled && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
 				auth.InferenceVerified = true
 				auth.LastInferenceVerifiedAt = now
 			}
-			if wasTerminalUnauthorized {
+			if isDisabled {
+				// A disabled credential (operator action or terminal TOS) stays
+				// unavailable until explicitly re-enabled; a late in-flight success
+				// must not reset model states or flip availability back to active.
+				auth.Unavailable = true
+			} else if wasTerminalUnauthorized {
 				if modelKey != "" {
 					state := ensureModelState(auth, modelKey)
 					modelState = state
@@ -1600,13 +1750,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				modelState = state
 				resetModelState(state, now)
 				auth.credentialRetryAfter = time.Time{}
+				auth.nonAuthCredentialRetryAfter = time.Time{}
+				auth.nonAuthCredentialLastError = nil
 				updateAggregatedAvailability(auth, now)
-				if !auth.Disabled && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
+				if !auth.Disabled && auth.Status != StatusDisabled && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
 					auth.LastError = nil
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
-			} else if !auth.Disabled {
+			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
@@ -1667,6 +1819,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					prevModelQuota := cooldownFieldsOf(state.Quota)
 					prevModelQuotaSignals := maps.Clone(state.Quota.cooldownSignals)
 					var ownModelForceDeadline time.Time
+					var ownModelNonQuotaDeadline time.Time
 					isForceResult := isForceCooldownError(result.Error)
 					appliedCredQuotaWrap := false
 					if result.Error != nil {
@@ -1688,9 +1841,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
 						}
+						ownModelNonQuotaDeadline = state.NextRetryAfter
 					} else if isCloudflareChallengeResultError(result.Error) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
 						state.NextRetryAfter = next
+						ownModelNonQuotaDeadline = next
 						state.StatusMessage = "cloudflare challenge"
 						if auth.LastError != nil && !wasTerminalUnauthorized {
 							auth.StatusMessage = "cloudflare challenge"
@@ -1707,6 +1862,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						} else {
 							state.NextRetryAfter = now.Add(30 * time.Minute)
 						}
+						ownModelNonQuotaDeadline = state.NextRetryAfter
 					} else if !result.CredentialScope && isTransientRateLimitResultError(result.Error) && statusCode == http.StatusTooManyRequests {
 						// Transient per-turn capacity rejection (issue 7017): cool
 						// only the reporting model until the provider retry hint.
@@ -1715,6 +1871,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						// a still-live genuine quota deadline is left untouched and
 						// keeps blocking through the generic retry branches below.
 						next := transientRateLimitRetryAfter(now, result.RetryAfter, disableCooling)
+						ownModelNonQuotaDeadline = next
 						if isForceResult {
 							ownModelForceDeadline = next
 						}
@@ -1907,15 +2064,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						}
+						if !isQuotaCooldownResultError(result.Error) {
+							ownModelNonQuotaDeadline = state.NextRetryAfter
+						}
 					}
 
-					if disableCooling && state.NextRetryAfter.IsZero() && state.Quota.NextRecoverAt.IsZero() {
+					if disableCooling && !isTOSViolationResultError(result.Error) && state.NextRetryAfter.IsZero() && state.Quota.NextRecoverAt.IsZero() {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
 					if isForceResult && state.NextRetryAfter.IsZero() {
 						state.NextRetryAfter = now.Add(transientErrorCooldown)
 						state.Unavailable = true
+					}
+					if isForceResult && !isQuotaCooldownResultError(result.Error) && state.NextRetryAfter.After(ownModelNonQuotaDeadline) {
+						ownModelNonQuotaDeadline = state.NextRetryAfter
+					}
+					if ownModelNonQuotaDeadline.After(state.nonQuotaCooldownUntil) {
+						state.nonQuotaCooldownUntil = ownModelNonQuotaDeadline
 					}
 					if !appliedCredQuotaWrap {
 						if result.CredentialScope && auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.credQuotaForceUntil.After(now) && auth.Quota.NextRecoverAt.After(now) {
@@ -1928,6 +2094,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							state.Status = StatusError
 							if state.NextRetryAfter.Before(auth.credQuotaForceUntil) {
 								state.NextRetryAfter = auth.credQuotaForceUntil
+							}
+							if ownModelNonQuotaDeadline.After(state.nonQuotaCooldownUntil) {
+								state.nonQuotaCooldownUntil = ownModelNonQuotaDeadline
 							}
 							state.UpdatedAt = now
 						} else {
@@ -1944,6 +2113,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.forceCooldownUntil = prevModelForceUntil
 							}
 							state.forceCooldownSeeded = true
+							if isForceResult && isQuotaCooldownResultError(result.Error) && ownModelForceDeadline.After(state.quotaForceCooldownUntil) {
+								state.quotaForceCooldownUntil = ownModelForceDeadline
+							}
 							if state.forceCooldownUntil.After(now) {
 								if state.NextRetryAfter.Before(state.forceCooldownUntil) {
 									state.NextRetryAfter = state.forceCooldownUntil
@@ -2017,6 +2189,29 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								otherState.cooldownRecordedSeq = cooldownSeq
 							}
 						}
+					}
+					if result.CredentialScope && !disableCooling && !appliedCredQuotaWrap && !isTOSViolationResultError(result.Error) && !wasTerminalUnauthorized && ownModelNonQuotaDeadline.After(now) {
+						if ownModelNonQuotaDeadline.After(auth.credentialRetryAfter) {
+							auth.credentialRetryAfter = ownModelNonQuotaDeadline
+						}
+						if !isRefreshClearableCredentialError(result.Error) {
+							if ownModelNonQuotaDeadline.After(auth.nonAuthCredentialRetryAfter) {
+								auth.nonAuthCredentialRetryAfter = ownModelNonQuotaDeadline
+								auth.nonAuthCredentialLastError = cloneError(result.Error)
+							} else if auth.nonAuthCredentialLastError == nil {
+								auth.nonAuthCredentialLastError = cloneError(result.Error)
+							}
+						}
+						if ownModelNonQuotaDeadline.After(auth.nonQuotaCooldownUntil) {
+							auth.nonQuotaCooldownUntil = ownModelNonQuotaDeadline
+						}
+						if isForceResult {
+							if ownModelNonQuotaDeadline.After(auth.forceCooldownUntil) {
+								auth.forceCooldownUntil = ownModelNonQuotaDeadline
+							}
+							auth.forceCooldownSeeded = true
+						}
+						auth.cooldownRecordedSeq = cooldownSeq
 					}
 					if isTOSViolationResultError(result.Error) {
 						auth.StatusMessage = "tos_violation"
@@ -2116,8 +2311,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if ownAuthRetryDeadline.After(auth.credentialRetryAfter) {
 								auth.credentialRetryAfter = ownAuthRetryDeadline
 							}
+							if !isRefreshClearableCredentialError(result.Error) {
+								if ownAuthRetryDeadline.After(auth.nonAuthCredentialRetryAfter) {
+									auth.nonAuthCredentialRetryAfter = ownAuthRetryDeadline
+									auth.nonAuthCredentialLastError = cloneError(result.Error)
+								} else if auth.nonAuthCredentialLastError == nil {
+									auth.nonAuthCredentialLastError = cloneError(result.Error)
+								}
+							}
 						}
-						if isolatedModelAgg && !isCloudflareChallengeResultError(result.Error) {
+						if isolatedModelAgg && !isCloudflareChallengeResultError(result.Error) && !isTOSViolationResultError(result.Error) {
 							savedModelAggQuota.Signals = mergeQuotaObservation(auth.Quota, savedModelAggQuota).Signals
 							applyCooldownFields(&auth.Quota, savedModelAggQuota)
 							updateAggregatedAvailability(auth, now)
@@ -2140,7 +2343,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
 			auth.NextRetryAfter = time.Time{}
-		} else if auth.Status == StatusDisabled {
+		} else if auth.Disabled || auth.Status == StatusDisabled {
 			// A terminal TOS_VIOLATION already deactivated the credential inside
 			// applyAuthFailureState; preserve that state instead of overwriting
 			// it with a generic error status.
@@ -2300,6 +2503,18 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	m.publishErrorEvent(result, authSnapshot)
 }
 
+func modelStateKey(auth *Auth, model string) string {
+	if isCopilotAuth(auth) {
+		// Keep restored route IDs intact until the Copilot catalog can resolve them.
+		return strings.TrimSpace(model)
+	}
+	return canonicalModelKey(model)
+}
+
+func modelStateLookupKey(auth *Auth, model string) string {
+	return strings.ToLower(modelStateKey(auth, model))
+}
+
 func existingModelState(auth *Auth, model string) *ModelState {
 	model = canonicalModelKey(model)
 	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
@@ -2314,7 +2529,7 @@ func existingModelState(auth *Auth, model string) *ModelState {
 	}
 	var matched *ModelState
 	for stateModel, state := range auth.ModelStates {
-		if state == nil || canonicalModelLookupKey(stateModel) != lookupKey {
+		if state == nil || modelStateLookupKey(auth, stateModel) != lookupKey {
 			continue
 		}
 		if matched == nil {
@@ -2327,7 +2542,7 @@ func existingModelState(auth *Auth, model string) *ModelState {
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
-	model = canonicalModelKey(model)
+	model = modelStateKey(auth, model)
 	if auth == nil || model == "" {
 		return nil
 	}
@@ -2338,9 +2553,9 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	if state, ok := auth.ModelStates[model]; ok && state != nil {
 		return state
 	}
-	lookupKey := canonicalModelLookupKey(model)
+	lookupKey := modelStateLookupKey(auth, model)
 	for stateModel, state := range auth.ModelStates {
-		if canonicalModelLookupKey(stateModel) == lookupKey && state != nil {
+		if modelStateLookupKey(auth, stateModel) == lookupKey && state != nil {
 			return state
 		}
 	}
@@ -2365,14 +2580,14 @@ func normalizeModelStates(auth *Auth) bool {
 	changed := false
 	for _, model := range keys {
 		state := auth.ModelStates[model]
-		modelKey := canonicalModelKey(model)
+		modelKey := modelStateKey(auth, model)
 		if modelKey == "" {
 			modelKey = strings.TrimSpace(model)
 		}
 		if modelKey != model {
 			changed = true
 		}
-		lookupKey := canonicalModelLookupKey(modelKey)
+		lookupKey := modelStateLookupKey(auth, modelKey)
 		if lookupKey == "" {
 			lookupKey = strings.ToLower(modelKey)
 		}
@@ -2465,6 +2680,14 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.forceCooldownUntil.After(merged.forceCooldownUntil) {
 		merged.forceCooldownUntil = source.forceCooldownUntil
 	}
+	merged.quotaForceCooldownUntil = target.quotaForceCooldownUntil
+	if source.quotaForceCooldownUntil.After(merged.quotaForceCooldownUntil) {
+		merged.quotaForceCooldownUntil = source.quotaForceCooldownUntil
+	}
+	merged.nonQuotaCooldownUntil = target.nonQuotaCooldownUntil
+	if source.nonQuotaCooldownUntil.After(merged.nonQuotaCooldownUntil) {
+		merged.nonQuotaCooldownUntil = source.nonQuotaCooldownUntil
+	}
 	merged.forceCooldownSeeded = target.forceCooldownSeeded || source.forceCooldownSeeded
 	if merged.StatusMessage == "" {
 		merged.StatusMessage = fallback.StatusMessage
@@ -2512,6 +2735,8 @@ func resetModelState(state *ModelState, now time.Time) {
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.cooldownRecordedSeq = 0
 	state.forceCooldownUntil = time.Time{}
+	state.quotaForceCooldownUntil = time.Time{}
+	state.nonQuotaCooldownUntil = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
 	state.UpdatedAt = now
@@ -2606,25 +2831,41 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
+	// A disabled credential (operator action or terminal TOS suspension) stays
+	// unavailable regardless of sibling model states.
+	if auth.Disabled || auth.Status == StatusDisabled {
+		auth.Unavailable = true
+		return
+	}
 	// A terminal unauthorized credential stays blocked until its tokens change.
 	// Model-level results must not make it selectable again.
 	if hasUnauthorizedAuthFailure(auth) {
 		auth.Unavailable = true
 		return
 	}
+	if !auth.credentialRetryAfter.IsZero() && !auth.credentialRetryAfter.After(now) {
+		auth.credentialRetryAfter = time.Time{}
+	}
+	if !auth.nonAuthCredentialRetryAfter.IsZero() && !auth.nonAuthCredentialRetryAfter.After(now) {
+		auth.nonAuthCredentialRetryAfter = time.Time{}
+		auth.nonAuthCredentialLastError = nil
+	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		auth.Unavailable = true
+		if auth.NextRetryAfter.Before(auth.Quota.NextRecoverAt) {
+			auth.NextRetryAfter = auth.Quota.NextRecoverAt
+		}
 		if activeAuthForce := effectiveAuthForceUntil(auth); activeAuthForce.After(now) && auth.NextRetryAfter.Before(activeAuthForce) {
 			auth.NextRetryAfter = activeAuthForce
+		}
+		if auth.credentialRetryAfter.After(now) && auth.NextRetryAfter.Before(auth.credentialRetryAfter) {
+			auth.NextRetryAfter = auth.credentialRetryAfter
 		}
 		return
 	}
 	activeAuthForce := effectiveAuthForceUntil(auth)
 	if !activeAuthForce.After(now) && !auth.forceCooldownUntil.IsZero() {
 		auth.forceCooldownUntil = time.Time{}
-	}
-	if !auth.credentialRetryAfter.IsZero() && !auth.credentialRetryAfter.After(now) {
-		auth.credentialRetryAfter = time.Time{}
 	}
 	if len(auth.ModelStates) == 0 {
 		if activeAuthForce.After(now) {
@@ -2831,6 +3072,10 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		auth.Unavailable = true
+		return
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		auth.Unavailable = true
 		return
@@ -2857,8 +3102,12 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.NextRetryAfter = time.Time{}
 	auth.cooldownRecordedSeq = 0
 	auth.forceCooldownUntil = time.Time{}
+	auth.quotaForceCooldownUntil = time.Time{}
 	auth.credQuotaForceUntil = time.Time{}
 	auth.credentialRetryAfter = time.Time{}
+	auth.nonAuthCredentialRetryAfter = time.Time{}
+	auth.nonAuthCredentialLastError = nil
+	auth.nonQuotaCooldownUntil = time.Time{}
 	auth.UpdatedAt = now
 }
 
@@ -3365,6 +3614,8 @@ func isTerminalRefreshGrantMessage(message string) bool {
 		"refresh_outcome_unknown",
 		"refresh_token_reused",
 		"refresh_token_expired",
+		// Anthropic returns {"error": "invalid_grant", "error_description": "Refresh token expired"}.
+		"refresh token expired",
 		"refresh_token_invalidated",
 		"token_revoked",
 		"invalid_client",
@@ -3414,6 +3665,9 @@ func terminalRefreshErrorCode(message string, statusCode int) string {
 		if strings.Contains(lower, code) {
 			return code
 		}
+	}
+	if strings.Contains(lower, "refresh token expired") {
+		return "refresh_token_expired"
 	}
 	if isInvalidGrantErrorMessage(lower) {
 		return "invalid_grant"
@@ -3727,6 +3981,15 @@ func isCloudflareChallengeResultError(err *Error) bool {
 // TOS_VIOLATION). The executor marks these via the tos_violation error code so
 // the credential is deactivated instead of cooled; sibling credentials are not
 // hammered during an automated sweep.
+// isRefreshClearableCredentialError reports whether a credential-scoped non-429
+// failure is an ordinary auth/grant error that an OAuth token refresh may clear.
+func isRefreshClearableCredentialError(err *Error) bool {
+	if err == nil || isForceCooldownError(err) {
+		return false
+	}
+	return isUnauthorizedError(err) || isInvalidGrantResultError(err)
+}
+
 func isTOSViolationResultError(err *Error) bool {
 	if err == nil {
 		return false
@@ -4123,6 +4386,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		prevCredQuotaForceUntil = auth.credQuotaForceUntil
 	}
 	var ownAuthForceDeadline time.Time
+	var ownAuthNonQuotaDeadline time.Time
 	isForceAuth := isForceCooldownError(resultErr)
 	if shouldSkipCredentialCooldown(resultErr) {
 		return time.Time{}, time.Time{}
@@ -4147,6 +4411,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		// Without a model key the transient capacity rejection degrades to an
 		// auth-level transient cooldown (issue 7017), never quota exhaustion.
 		next := transientRateLimitRetryAfter(now, retryAfter, disableCooling)
+		ownAuthNonQuotaDeadline = next
 		if isForceAuth {
 			ownAuthForceDeadline = next
 		}
@@ -4161,6 +4426,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	} else if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
+		ownAuthNonQuotaDeadline = next
 		applyCooldownFields(&auth.Quota, QuotaState{
 			Exceeded:      true,
 			Reason:        "cloudflare challenge",
@@ -4274,6 +4540,24 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
+	ownAuthRetryDeadline := auth.NextRetryAfter
+	if isForceAuth && ownAuthForceDeadline.After(ownAuthRetryDeadline) {
+		ownAuthRetryDeadline = ownAuthForceDeadline
+	}
+	if !isQuotaCooldownResultError(resultErr) {
+		if !ownAuthNonQuotaDeadline.IsZero() || isTransientRateLimitResultError(resultErr) {
+			ownAuthRetryDeadline = ownAuthNonQuotaDeadline
+		}
+		if !isTransientRateLimitResultError(resultErr) && ownAuthNonQuotaDeadline.IsZero() {
+			ownAuthNonQuotaDeadline = auth.NextRetryAfter
+		}
+		if isForceAuth && ownAuthForceDeadline.After(ownAuthNonQuotaDeadline) {
+			ownAuthNonQuotaDeadline = ownAuthForceDeadline
+		}
+		if ownAuthNonQuotaDeadline.After(auth.nonQuotaCooldownUntil) {
+			auth.nonQuotaCooldownUntil = ownAuthNonQuotaDeadline
+		}
+	}
 	if isForceAuth {
 		if ownAuthForceDeadline.IsZero() {
 			ownAuthForceDeadline = auth.NextRetryAfter
@@ -4287,6 +4571,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.forceCooldownUntil = prevAuthForceUntil
 	}
 	auth.forceCooldownSeeded = true
+	if isForceAuth && isQuotaCooldownResultError(resultErr) && ownAuthForceDeadline.After(auth.quotaForceCooldownUntil) {
+		auth.quotaForceCooldownUntil = ownAuthForceDeadline
+	}
 	if prevCredQuotaForceUntil.After(now) {
 		if prevCredQuotaForceUntil.After(auth.credQuotaForceUntil) {
 			auth.credQuotaForceUntil = prevCredQuotaForceUntil
@@ -4319,10 +4606,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			restored.cooldownSignals = prevAuthQuotaSignals
 			applyCooldownFields(&auth.Quota, restored)
 		}
-	}
-	ownAuthRetryDeadline := auth.NextRetryAfter
-	if isForceAuth && ownAuthForceDeadline.After(ownAuthRetryDeadline) {
-		ownAuthRetryDeadline = ownAuthForceDeadline
 	}
 	// A later failure only extends a still-live credential cooldown; a
 	// deliberate zero write (disableCooling) still clears it.

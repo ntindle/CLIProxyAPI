@@ -2785,6 +2785,12 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "bio policy at 502",
+			status: http.StatusBadGateway,
+			body:   `{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
+			want:   true,
+		},
+		{
 			name:   "context length exceeded at 500",
 			status: http.StatusInternalServerError,
 			body:   `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`,
@@ -4322,6 +4328,7 @@ func TestResponsesWebsocketSwitchesPinnedAuthAcrossProviders(t *testing.T) {
 }
 
 func TestResponsesWebsocketPinnedAuthMatchesModel(t *testing.T) {
+	handler := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil)))
 	modelA := "xai-pinned-auth-model-a"
 	modelB := "xai-pinned-auth-model-b"
 	auth := &coreauth.Auth{ID: "xai-pinned-auth", Provider: "xai", Status: coreauth.StatusActive}
@@ -4333,16 +4340,16 @@ func TestResponsesWebsocketPinnedAuthMatchesModel(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(otherAuthID)
 	})
 
-	if !responsesWebsocketPinnedAuthMatchesModel(auth, modelA, modelA, false) {
+	if !handler.responsesWebsocketPinnedAuthMatchesModel(auth, modelA, modelA, false) {
 		t.Fatal("expected registered auth to match its supported model")
 	}
-	if responsesWebsocketPinnedAuthMatchesModel(auth, modelB, modelA, false) {
+	if handler.responsesWebsocketPinnedAuthMatchesModel(auth, modelB, modelA, false) {
 		t.Fatal("registered auth matched an unsupported model from the same provider")
 	}
 
 	disabledAuth := auth.Clone()
 	disabledAuth.Disabled = true
-	if responsesWebsocketPinnedAuthMatchesModel(disabledAuth, modelA, modelA, false) {
+	if handler.responsesWebsocketPinnedAuthMatchesModel(disabledAuth, modelA, modelA, false) {
 		t.Fatal("disabled auth matched a model")
 	}
 
@@ -4350,18 +4357,18 @@ func TestResponsesWebsocketPinnedAuthMatchesModel(t *testing.T) {
 	cooldownAuth.ModelStates = map[string]*coreauth.ModelState{
 		modelA: {Unavailable: true, NextRetryAfter: time.Now().Add(time.Minute)},
 	}
-	if responsesWebsocketPinnedAuthMatchesModel(cooldownAuth, modelA, modelA, false) {
+	if handler.responsesWebsocketPinnedAuthMatchesModel(cooldownAuth, modelA, modelA, false) {
 		t.Fatal("auth in model cooldown matched a model")
 	}
 
 	unregisteredAuth := &coreauth.Auth{ID: "unregistered-auth", Provider: "xai", Status: coreauth.StatusActive}
-	if responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelA, modelA, false) {
+	if handler.responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelA, modelA, false) {
 		t.Fatal("unregistered ordinary auth matched a model")
 	}
-	if !responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelA, modelA, true) {
+	if !handler.responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelA, modelA, true) {
 		t.Fatal("expected Home runtime auth to match its pinned model")
 	}
-	if responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelB, modelA, true) {
+	if handler.responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelB, modelA, true) {
 		t.Fatal("Home runtime auth matched a different model")
 	}
 }

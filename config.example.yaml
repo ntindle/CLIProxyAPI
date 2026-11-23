@@ -22,6 +22,11 @@ models:
 
 # Listener, TLS, network discovery, and server operation.
 server:
+  # Deployment UUID. Leave empty to generate and save one on the first valid startup.
+  # The value is normalized to lowercase; a read-only file uses a generated ID for
+  # this process only. Reuse the persisted value across restarts and shared storage.
+  server-id: ""
+
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
   # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
   host: ""
@@ -356,20 +361,45 @@ requests:
   #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
-  #   replace: # Ordered literal replacements in existing user text; runs after overrides, before filter.
-  #     - models: # Same model, protocol, header, and payload conditions as other rules.
+  #   replace: # Ordered literal and Go RE2 regex replacements in existing strings; runs after overrides, before filter.
+  #     - models:
   #         - name: "*"
   #           protocol: "claude"
   #           from-protocol: "openai"
   #       target:
-  #         role: user
-  #         positions: [1, 2] # One-based user positions in the final upstream body; missing positions are skipped.
-  #         # all: true      # Select every user instead of positions (mutually exclusive).
-  #       replacements: # Each entry has exactly one non-empty string key and a string value.
+  #         role: user # system, developer, or user
+  #         positions: [1, 2] # One-based positions of the selected role in the final upstream body; missing positions are skipped.
+  #         # all: true      # Select all messages of this role instead of positions (mutually exclusive).
+  #       replacements: # Each entry is either {"source": "destination"} (literal) or {pattern, replacement} (Go RE2 regex; $1/${1} expand captures).
   #         - "you are hero": "you are fool"
   #         - "remove this phrase": ""
-  #       # Text blocks are processed separately; images, tools, and thinking are not modified.
+  #         - pattern: '(?i)\bhero\b'
+  #           replacement: "friend"
+  #         - pattern: '(?s)<debug>.*?</debug>'
+  #           replacement: ""
+  #       # Invalid regex entries are skipped with an index-only warning; other replacements still run.
+  #       # Role targets process text blocks separately; assistant replies, images, tools, and thinking are not modified.
   #       # Supported layouts: OpenAI Chat, Claude, Responses/Codex, Gemini, and Antigravity.
+  #       # system includes Claude system, Gemini systemInstruction, and Responses instructions (each counts as one message, before any system messages).
+  #       # developer merged into system during translation must be selected as system.
+  #       # Matching uses final upstream roles, not the original client roles.
+  #     - models:
+  #         - name: "*"
+  #           protocol: "codex"
+  #       target:
+  #         paths: # Alternative to role/positions/all (mutually exclusive); paths are relative to the provider payload root.
+  #           - 'tools.#(type=="function")#.description'
+  #           - "metadata.description"
+  #       replacements: # Same ordered literal and Go RE2 regex rules as role targets; $1/${1} expand captures.
+  #         - "old name": "new name"
+  #         - "remove this phrase": ""
+  #         - pattern: '(?i)user-(\d+)'
+  #           replacement: 'account-${1}'
+  #         - pattern: '(?s)<debug>.*?</debug>'
+  #           replacement: ""
+  #       # Invalid regex entries are skipped with an index-only warning; other replacements still run.
+  #       # Path targets edit only existing string nodes, regardless of role or field; missing/non-string nodes are skipped.
+  #       # Objects/arrays are not traversed recursively; duplicate resolved paths are replaced once per rule.
   #   filter: # Filter rules remove specified parameters from the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
@@ -1055,7 +1085,7 @@ oauth:
 
   # Global OAuth model name aliases (per channel)
   # These aliases rename model IDs for both model listing and request routing.
-  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
   # NOTE: These aliases do not apply to any of the upstream groups under api-keys.
   # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
   # client-visible names can become ambiguous across providers. For strict backend pinning, use
@@ -1105,14 +1135,23 @@ oauth:
   #   meta:
   #     - name: "muse-spark-1.3"
   #       alias: "muse-latest"
+  #   copilot:
+  #     - name: "copilot/claude-sonnet-5" # use the listed Copilot model ID, before any auth prefix
+  #       alias: "copilot-sonnet" # published verbatim; no automatic copilot/ prefix
   #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
   #     - name: "sample-model-latest"
   #       alias: "sample-latest"
 
   # OAuth provider model settings (per channel)
   # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
-  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
   # settings:
+  #   copilot:
+  #     - name: "copilot/gpt-5.3-codex" # canonical source ID, shared by its aliases
+  #       max-context-length: 131072
+  #     - name: "copilot/gpt-5.3-codex"
+  #       alias: "coding" # exact public alias before any credential prefix
+  #       max-context-length: 262144
   #   codex:
   #     - name: "gpt-6-sol"
   #       max-context-length: 524288 # overrides context window advertised to Codex clients
@@ -1142,6 +1181,8 @@ oauth:
   #     - "grok-3-mini"
   #   meta:
   #     - "muse-spark-1.1"
+  #   copilot:
+  #     - "copilot/claude-haiku-*" # match Copilot model IDs before aliases and auth prefixes
 
   # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
   # request-scoped-errors:
@@ -1189,6 +1230,11 @@ oauth:
   #       match:
   #         - "context_length_exceeded"
   #       action: "stop"
+  #   copilot:
+  #     - status: 400
+  #       match:
+  #         - "context_length_exceeded"
+  #       action: "stop"
 
   # Provider options below apply to OAuth/file-backed credentials.
   # API-key credentials use their own group/key options.
@@ -1197,10 +1243,18 @@ oauth:
       # When true, enable authentication for the WebSocket API (/v1/ws).
       ws-auth: true
 
+    # Claude OAuth login behavior.
+    # claude:
+    #   # Include the org:create_api_key scope during new Claude OAuth logins (default: true).
+    #   # Set to false to request only the five user:* scopes (note: claude.ai may require org:create_api_key).
+    #   oauth-include-create-api-key: true
+
     # Codex provider behavior.
     codex:
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+      # On Solaris and illumos, leave this disabled: in-process media relay is unsupported.
+      # Enabling it returns HTTP 503 for call setup; direct SDP forwarding and sideband work when disabled.
       live-media-relay:
         enabled: false
         # Maximum concurrent media sessions. Zero uses the default of 32.
@@ -1252,7 +1306,7 @@ oauth:
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
-      #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2)
+      #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2; <= 0 disables idle pooling)
       # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
                                     # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
       # Use credits as a last resort after free-tier Claude quota is exhausted.
